@@ -10,9 +10,6 @@ venv/
 data/
 !data/.gitkeep
 
-# Modelos
-# models/*.pt
-
 # Logs de entrenamiento
 runs/
 mlruns/
@@ -23,3 +20,9 @@ wandb/
 *.mp4
 *.jpg
 *.png
+
+# Ignorar pesos sueltos en cualquier carpeta
+*.pt
+
+# Permitir explícitamente modelo final
+!models/best.pt
