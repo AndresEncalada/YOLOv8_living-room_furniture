@@ -1,0 +1,25 @@
+# --- .gitignore ---
+# Python & System
+__pycache__/
+*.py[cod]
+venv/
+.env
+.vscode/
+
+# Dataset
+data/
+!data/.gitkeep
+
+# Modelos
+# models/*.pt
+
+# Logs de entrenamiento
+runs/
+mlruns/
+models_history/
+wandb/
+
+# Archivos temporales
+*.mp4
+*.jpg
+*.png

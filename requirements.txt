@@ -1,0 +1,13 @@
+ultralytics
+roboflow
+opencv-python
+matplotlib
+seaborn
+pandas
+mlflow
+fastapi
+uvicorn
+python-multipart
+sqlalchemy
+jinja2
+ipykernel
