@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YOLOv8 Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        canvas { cursor: crosshair; }
+        .btn-black { background-color: #0f172a; color: white; transition: all 0.3s; }
+        .btn-black:hover { background-color: #1e293b; }
+        .btn-black:disabled { background-color: #94a3b8; cursor: not-allowed; }
+        .btn-training { background-color: #cccccc; cursor: wait; } /* Amber for training */
+        .btn-success { background-color: #10B981; } /* Emerald for success */
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 h-screen flex flex-col">
+
+    <header class="bg-white border-b px-8 py-4 flex justify-between items-center shadow-sm z-20 shrink-0">
+        <div class="flex items-center gap-3">
+            <div class="w-10 h-10 bg-slate-900 rounded-md flex items-center justify-center text-white font-bold tracking-tighter">AI</div>
+            <h1 class="text-xl font-bold tracking-tight text-slate-900">Object Detection <span class="text-slate-400 font-light">| YOLOv8</span></h1>
+        </div>
+    </header>
+
+    <main class="flex-1 flex overflow-hidden">
+        <aside class="w-80 bg-white border-r p-6 flex flex-col gap-6 z-10 shrink-0 overflow-y-auto">
+            
+            <div>
+                <h3 class="text-xs uppercase font-bold text-slate-400 mb-2">1. Ingestion</h3>
+                <label class="block w-full h-24 border-2 border-dashed border-slate-300 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-slate-500 hover:bg-slate-50 transition">
+                    <span class="text-sm text-slate-500 font-medium">Upload Images</span>
+                    <input id="image-upload" type="file" class="hidden" multiple accept="image/*" onclick="this.value=null" />
+                </label>
+            </div>
+
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <h3 class="text-xs uppercase font-bold text-slate-500 mb-3">2. Annotation</h3>
+                <p class="text-xs text-slate-400 mb-2">Select Class:</p>
+                <select id="active-class-selector" class="w-full p-2.5 text-sm border border-slate-300 rounded bg-slate-50 focus:ring-2 focus:ring-slate-500 outline-none">
+                    <option value="Sofa">Sofa</option>
+                    <option value="Rug">Rug</option>
+                    <option value="Pillows">Pillows</option>
+                </select>
+                <div class="mt-4 pt-4 border-t border-slate-100">
+                    <button onclick="resetData()" class="text-xs text-red-400 hover:text-red-600 underline w-full text-center">
+                        Reset Feedback History
+                    </button>
+                </div>
+            </div>
+
+            <div class="mt-auto pt-6 border-t">
+                <h3 class="text-xs uppercase font-bold text-slate-400 mb-2">3. Pipeline</h3>
+                <button id="btn-retrain" onclick="triggerRetrain()" class="btn-black w-full font-medium py-3 rounded-lg shadow-md flex justify-center items-center gap-2">
+                    <svg id="icon-retrain" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    <svg id="icon-loading" class="w-5 h-5 hidden animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                    <span id="btn-text">Start Retraining</span>
+                </button>
+            </div>
+        </aside>
+
+        <section id="workspace" class="flex-1 bg-slate-100 p-8 overflow-y-auto flex flex-col items-center gap-8">
+            <div class="text-center mt-20 text-slate-400 max-w-md" id="empty-state">
+                <svg class="w-16 h-16 mx-auto mb-4 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                <p class="text-lg font-medium">Ready for Inference</p>
+                <p class="text-sm">Upload images to begin validation.</p>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const CLASS_MAP = { 'Sofa': 0, 'Rug': 1, 'Pillows': 2 };
+        let EDITOR_STATE = {};
+        let CURRENT_FILES = []; // STORE FILES FOR AUTO-RELOAD
+        let currentDrag = null; 
+
+        const uploadInput = document.getElementById('image-upload');
+        const workspace = document.getElementById('workspace');
+
+        uploadInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if(!files.length) return;
+            
+            CURRENT_FILES = files; // Save to global state
+            await processImages(files);
+        });
+
+        // Refactored into a reusable function
+        async function processImages(files) {
+            const fileMap = {};
+            files.forEach(f => fileMap[f.name] = f);
+
+            workspace.innerHTML = `
+                <div class="mt-20 flex flex-col items-center text-slate-500 animate-pulse">
+                    <svg class="animate-spin h-8 w-8 mb-4 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p>Processing...</p>
+                </div>`;
+            
+            EDITOR_STATE = {}; 
+
+            const formData = new FormData();
+            files.forEach(f => formData.append('files', f));
+
+            try {
+                const res = await fetch('/api/predict?t=' + new Date().getTime(), { 
+                    method: 'POST', 
+                    body: formData 
+                });
+                const data = await res.json();
+                
+                workspace.innerHTML = ''; 
+                
+                data.results.forEach(item => {
+                    const originalFile = fileMap[item.original_name];
+                    renderEditorCard(item, originalFile);
+                });
+            } catch(e) { 
+                console.error(e);
+                workspace.innerHTML = `<div class="text-red-500 mt-20">Error during inference.</div>`;
+            }
+        }
+
+        // --- RETRAIN LOGIC (SILENT & AUTO-RELOAD) ---
+        window.triggerRetrain = async () => {
+            // Check if we have feedback before training? Optional, but good practice.
+            // For now, we trust the user.
+
+            const btn = document.getElementById('btn-retrain');
+            const btnText = document.getElementById('btn-text');
+            const iconRetrain = document.getElementById('icon-retrain');
+            const iconLoading = document.getElementById('icon-loading');
+
+            // UI Loading State
+            btn.disabled = true;
+            btn.classList.remove('btn-black');
+            btn.classList.add('btn-training');
+            btnText.innerText = "Training Model...";
+            iconRetrain.classList.add('hidden');
+            iconLoading.classList.remove('hidden');
+            
+            try {
+                const res = await fetch('/api/retrain', { method: 'POST' });
+                if(res.ok) {
+                    pollStatus();
+                } else {
+                    throw new Error("API Error");
+                }
+            } catch(e) { 
+                resetButtonUI("Error", true);
+            }
+        };
+
+        async function pollStatus() {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    
+                    if(!data.training_active) {
+                        clearInterval(interval);
+                        
+                        // Training Finished
+                        resetButtonUI("Success! Reloading...", false);
+                        
+                        // AUTO-RELOAD RESULTS
+                        if (CURRENT_FILES.length > 0) {
+                            setTimeout(() => {
+                                processImages(CURRENT_FILES);
+                                // Reset button text after reload starts
+                                setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
+                            }, 1000);
+                        } else {
+                            setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
+                        }
+                    }
+                } catch(e) {
+                    clearInterval(interval);
+                    resetButtonUI("Connection Error", true);
+                }
+            }, 1500); // Check every 1.5s
+        }
+
+        function resetButtonUI(text, isError, isReset = false) {
+            const btn = document.getElementById('btn-retrain');
+            const btnText = document.getElementById('btn-text');
+            const iconRetrain = document.getElementById('icon-retrain');
+            const iconLoading = document.getElementById('icon-loading');
+
+            iconLoading.classList.add('hidden');
+            
+            if (isReset) {
+                btn.className = "btn-black w-full font-medium py-3 rounded-lg shadow-md flex justify-center items-center gap-2";
+                btnText.innerText = text;
+                iconRetrain.classList.remove('hidden');
+                btn.disabled = false;
+            } else if (isError) {
+                btn.className = "w-full bg-red-500 text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
+                btnText.innerText = text;
+                setTimeout(() => resetButtonUI("Start Retraining", false, true), 3000);
+            } else {
+                // Success State
+                btn.className = "btn-success w-full text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
+                btnText.innerText = text;
+                // Note: The timer to reset this is handled in the pollStatus function
+            }
+        }
+
+        // --- RESET DATA ---
+        window.resetData = async () => {
+            if(!confirm("⚠️ Delete all feedback history?")) return;
+            try {
+                await fetch('/api/reset', { method: 'POST' });
+                alert("History cleared.");
+            } catch(e) { alert("Error resetting data"); }
+        };
+
+        // --- RENDER & CANVAS LOGIC (UNCHANGED) ---
+        function renderEditorCard(item, fileObj) {
+            const card = document.createElement('div');
+            card.className = "w-full max-w-6xl bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden flex flex-col lg:flex-row flex-shrink-0";
+            card.style.height = "75vh"; 
+            
+            const canvasId = `cnv-${item.file_id}`;
+            const imgAreaId = `area-${item.file_id}`;
+            
+            const imgArea = document.createElement('div');
+            imgArea.id = imgAreaId;
+            imgArea.className = "relative bg-slate-900 lg:w-3/4 h-full flex items-center justify-center p-4";
+            imgArea.innerHTML = `
+                <img src="" id="img-${item.file_id}" class="hidden" />
+                <canvas id="${canvasId}" class="shadow-2xl" style="max-width: 100%; max-height: 100%; width: auto; height: auto;"></canvas>
+            `;
+            
+            const controls = document.createElement('div');
+            controls.className = "lg:w-1/4 w-full border-l border-slate-200 bg-slate-50 p-4 flex flex-col gap-3 overflow-y-auto";
+            controls.innerHTML = `
+                <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-200">
+                    <h4 class="font-bold text-slate-700 truncate w-32" title="${item.original_name}">${item.original_name}</h4>
+                    <span class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-mono">Pending</span>
+                </div>
+                <div id="list-${item.file_id}" class="flex-1 flex flex-col gap-2"></div>
+                <div class="mt-2 pt-2 border-t border-slate-200">
+                    <button onclick="saveCorrection('${item.file_id}')" class="btn-black w-full text-sm font-medium py-3 rounded shadow-sm">
+                        Confirm & Save
+                    </button>
+                </div>
+            `;
+
+            card.appendChild(imgArea);
+            card.appendChild(controls);
+            workspace.appendChild(card);
+
+            if(fileObj) {
+                const url = URL.createObjectURL(fileObj);
+                const imgObj = new Image();
+                imgObj.src = url;
+                imgObj.onload = () => {
+                   initCanvas(canvasId, imgAreaId, item.file_id, imgObj, item.detections);
+                   renderList(item.file_id, item.detections);
+                };
+            }
+        }
+
+        function initCanvas(canvasId, containerId, fileId, img, detections) {
+            const canvas = document.getElementById(canvasId);
+            const container = document.getElementById(containerId);
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const imgRatio = img.width / img.height;
+            const containerRatio = container.clientWidth / container.clientHeight;
+            if (imgRatio > containerRatio) {
+                canvas.style.width = '100%'; canvas.style.height = 'auto';
+            } else {
+                canvas.style.width = 'auto'; canvas.style.height = '100%';
+            }
+            EDITOR_STATE[fileId] = { detections: [...detections], img: img, canvas: canvas };
+            canvas.addEventListener('mousedown', (e) => startDrawing(e, fileId));
+            canvas.addEventListener('mousemove', (e) => drawMove(e, fileId));
+            canvas.addEventListener('mouseup', (e) => endDrawing(e, fileId));
+            canvas.addEventListener('mouseout', (e) => { if(currentDrag) currentDrag = null; draw(fileId); });
+            draw(fileId);
+        }
+
+        function getMousePos(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+        }
+
+        function startDrawing(e, fileId) {
+            const pos = getMousePos(e.target, e);
+            currentDrag = { fileId, startX: pos.x, startY: pos.y, currX: pos.x, currY: pos.y };
+        }
+
+        function drawMove(e, fileId) {
+            if (!currentDrag || currentDrag.fileId !== fileId) return;
+            const pos = getMousePos(e.target, e);
+            currentDrag.currX = pos.x;
+            currentDrag.currY = pos.y;
+            draw(fileId);
+        }
+
+        function endDrawing(e, fileId) {
+            if (!currentDrag || currentDrag.fileId !== fileId) return;
+            const x1 = Math.min(currentDrag.startX, currentDrag.currX);
+            const y1 = Math.min(currentDrag.startY, currentDrag.currY);
+            const x2 = Math.max(currentDrag.startX, currentDrag.currX);
+            const y2 = Math.max(currentDrag.startY, currentDrag.currY);
+            const baseSize = Math.max(EDITOR_STATE[fileId].img.width, EDITOR_STATE[fileId].img.height);
+            const minSize = baseSize * 0.02; 
+            
+            if ((x2 - x1) > minSize && (y2 - y1) > minSize) {
+                const selectedClass = document.getElementById('active-class-selector').value;
+                const classId = CLASS_MAP[selectedClass] || 0;
+                EDITOR_STATE[fileId].detections.push({
+                    class: selectedClass, class_id: classId, confidence: 1.0, box: [x1, y1, x2, y2]
+                });
+                renderList(fileId, EDITOR_STATE[fileId].detections);
+            }
+            currentDrag = null;
+            draw(fileId);
+        }
+
+        function draw(fileId) {
+            const state = EDITOR_STATE[fileId];
+            const ctx = state.canvas.getContext('2d');
+            ctx.clearRect(0, 0, state.canvas.width, state.canvas.height);
+            ctx.drawImage(state.img, 0, 0);
+            const baseSize = Math.max(state.img.width, state.img.height);
+            const scale = Math.max(0.5, baseSize / 1000);
+            const drawBox = (box, label, color, isDashed=false) => {
+                const [x1, y1, x2, y2] = box;
+                const w = x2 - x1;
+                const h = y2 - y1;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = (isDashed ? 3 : 5) * scale;
+                if(isDashed) ctx.setLineDash([15 * scale, 10 * scale]); else ctx.setLineDash([]);
+                ctx.strokeRect(x1, y1, w, h);
+                if(label) {
+                    const fontSize = Math.floor(22 * scale);
+                    ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+                    const padding = 8 * scale;
+                    const textMetrics = ctx.measureText(label);
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x1, y1 - fontSize - (padding * 2), textMetrics.width + (padding * 2), fontSize + (padding * 2));
+                    ctx.fillStyle = '#FFF';
+                    ctx.fillText(label, x1 + padding, y1 - padding);
+                }
+            };
+            state.detections.forEach(det => {
+                let color = '#2563EB'; 
+                const cls = det.class.toLowerCase();
+                if (cls.includes('rug')) color = '#10B981'; 
+                if (cls.includes('sofa')) color = '#F59E0B'; 
+                if (cls.includes('pillow')) color = '#8B5CF6'; 
+                const label = `${det.class} ${Math.round(det.confidence*100)}%`;
+                drawBox(det.box, label, color);
+            });
+            if (currentDrag && currentDrag.fileId === fileId) {
+                const x = Math.min(currentDrag.startX, currentDrag.currX);
+                const y = Math.min(currentDrag.startY, currentDrag.currY);
+                const w = Math.abs(currentDrag.currX - currentDrag.startX);
+                const h = Math.abs(currentDrag.currY - currentDrag.startY);
+                const selectedClass = document.getElementById('active-class-selector').value;
+                drawBox([x, y, x + w, y + h], `NEW: ${selectedClass}`, '#EC4899', true); 
+            }
+        }
+
+        function renderList(fileId, detections) {
+            const container = document.getElementById(`list-${fileId}`);
+            container.innerHTML = '';
+            if(detections.length === 0) {
+                container.innerHTML = `
+                    <div class="flex flex-col items-center justify-center h-32 text-center border-2 border-dashed border-red-200 bg-red-50 rounded-lg">
+                        <span class="text-red-600 font-bold text-sm">No furniture detected</span>
+                        <span class="text-red-400 text-xs mt-1">Please add manual labels</span>
+                    </div>`;
+                return;
+            }
+            detections.forEach((det, idx) => {
+                const row = document.createElement('div');
+                row.className = "bg-slate-50 p-2 rounded border border-slate-200 flex items-center justify-between text-sm";
+                row.innerHTML = `
+                    <div class="flex flex-col">
+                        <span class="font-bold text-slate-700">${det.class}</span>
+                        <span class="text-xs text-slate-500">${Math.round(det.confidence*100)}% Conf</span>
+                    </div>
+                    <button onclick="deleteBox('${fileId}', ${idx})" class="text-red-500 hover:text-red-700 p-1" title="Remove">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        window.deleteBox = (fileId, idx) => {
+            EDITOR_STATE[fileId].detections.splice(idx, 1);
+            draw(fileId);
+            renderList(fileId, EDITOR_STATE[fileId].detections);
+        };
+
+        window.saveCorrection = async (fileId) => {
+            const state = EDITOR_STATE[fileId];
+            const btn = document.querySelector(`button[onclick="saveCorrection('${fileId}')"]`);
+            btn.innerText = "Saving...";
+            btn.disabled = true;
+            try {
+                await fetch('/api/feedback', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ file_id: fileId, boxes: state.detections })
+                });
+                btn.className = "w-full bg-slate-100 text-slate-500 border border-slate-200 text-sm py-3 rounded cursor-default";
+                btn.innerText = "Saved";
+            } catch(e) { 
+                alert("Save failed"); 
+                btn.innerText = "Confirm & Save";
+                btn.disabled = false;
+            }
+        };
+    </script>
+</body>
+</html>
