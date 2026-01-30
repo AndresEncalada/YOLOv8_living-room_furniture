@@ -6,6 +6,7 @@ import numpy as np
 import logging
 import gc
 import glob
+import torch
 from typing import List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Body
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -20,7 +21,7 @@ class EndpointFilter(logging.Filter):
         return "/api/status" not in record.getMessage()
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
-app = FastAPI(title="Furniture Detection System", version="3.7.0")
+app = FastAPI(title="Furniture Detection System", version="5.0.0-GITHUB-SAVER")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("API")
 
@@ -32,39 +33,83 @@ FEEDBACK_DIR = os.path.join(BASE_DIR, "data", "feedback_dataset")
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(os.path.join(FEEDBACK_DIR, "images"), exist_ok=True)
 os.makedirs(os.path.join(FEEDBACK_DIR, "labels"), exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 templates = Jinja2Templates(directory="app/templates")
 
+# --- TRADUCTOR: MODELO GITHUB -> TU NEGOCIO ---
+# Aquí mapeamos las clases raras del modelo de GitHub a tus 3 Clases.
 CLASS_MAPPING = {
-    "sofa": "Sofa", "sofas": "Sofa", "couch": "Sofa",
-    "accent chair": "Sofa", "armchair": "Sofa", "chair": "Sofa",
-    "loveseat": "Sofa", "bench": "Sofa", "stool": "Sofa",
-    "rug": "Rug", "rugs": "Rug", "carpet": "Rug", "mat": "Rug",
-    "pillow": "Pillows", "pillows": "Pillows", "pillowss": "Pillows",
-    "cushion": "Pillows", "cushions": "Pillows"
+    "sofa": "Sofa",
+    "couch": "Sofa",
+
+    # RUG
+    "rug": "Rug",
+    "rugs": "Rug",
+    "carpet": "Rug",
+    "mat": "Rug",
+    
+    # PILLOWS
+    "pillow": "Pillows",
+    "pillows": "Pillows",
+    "pillowss": "Pillows",
+    "cushion": "Pillows",
+    "cushions": "Pillows"
 }
 
+# --- CLASES EXTRA ---
 EXTRA_ALLOWED_LABELS = {
-    "chandelier", "chandeliers",
-    "lamp", "table lamp", "floor lamp",
-    "plant", "artificial plants",
-    "picture frame", "curtain", "curtains"
+    "chandelier": "Chandelier", # <--- TU MODELO DETECTA ESTO
+    "chandeliers": "Chandelier",
+    "lamp": "Lamp",
+    "floor lamp": "Lamp",
+    "table lamp": "Lamp",
+    "plant": "Plant",
+    "plants": "Plant",
+    "plantss": "Plant", # Typo posible en dataset viejos
+    "artificial plants": "Plant",
+    "picture frame": "Decor",
+    "coffee table": "Table",
+    "end - side tables": "Table",
+    "end table": "Table",
+    "armchair": "Arm Chair",
+    "accent chair": "Accent Chair"
 }
 
-# State vars
-initial_models = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
-CURRENT_MODEL_PATH = initial_models[-1] if initial_models else os.path.join(MODEL_DIR, "best.pt")
+MAIN_LABELS = {"Sofa", "Rug", "Pillows"}
+
+# --- ESTADO GLOBAL ---
 model = None
 is_training = False
+CURRENT_MODEL_PATH = None
+
+def cleanup_old_models(keep_file_path=None):
+    try:
+        all_models = glob.glob(os.path.join(MODEL_DIR, "best_v*.pt"))
+        for m_path in all_models:
+            if keep_file_path and os.path.abspath(m_path) == os.path.abspath(keep_file_path): continue
+            try: os.remove(m_path)
+            except: pass
+    except: pass
 
 @app.on_event("startup")
 def load_model():
     global model, CURRENT_MODEL_PATH
-    if os.path.exists(CURRENT_MODEL_PATH):
-        model = YOLO(CURRENT_MODEL_PATH)
-        logger.info(f"Loaded: {os.path.basename(CURRENT_MODEL_PATH)}")
+    
+    # 1. Buscamos modelos (Tu modelo de GitHub debería estar aquí)
+    custom_models = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
+    
+    # Ordenamos por fecha para usar siempre el último (sea el de GitHub o uno nuevo)
+    if custom_models:
+        # Preferimos los que empiezan por 'best_v' (nuevos), si no, el que haya
+        latest_model = max(custom_models, key=os.path.getctime)
+        CURRENT_MODEL_PATH = latest_model
+        logger.info(f"✅ Cargando MODELO PRE-ENTRENADO: {os.path.basename(latest_model)}")
+        model = YOLO(latest_model)
     else:
-        logger.warning(f"Model not found at {CURRENT_MODEL_PATH}")
+        logger.warning("⚠️ No se encontró ningún modelo en /models. Descargando base...")
+        CURRENT_MODEL_PATH = "yolov8m.pt"
+        model = YOLO(CURRENT_MODEL_PATH)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -87,6 +132,7 @@ async def predict_batch(files: List[UploadFile] = File(...)):
         img = cv2.imread(temp_path)
         if img is None: continue
             
+        # Inferencia
         results = model(img, conf=0.10, iou=0.5)
         
         detections = []
@@ -98,27 +144,39 @@ async def predict_batch(files: List[UploadFile] = File(...)):
                 final_name = None
                 is_main = False 
 
+                # 1. Mapeo Inteligente (GitHub -> Tu Negocio)
                 if raw_name in CLASS_MAPPING:
                     final_name = CLASS_MAPPING[raw_name]
                     is_main = True
-                else:
-                    for key, target in CLASS_MAPPING.items():
-                        if key in raw_name:
-                            final_name = target
-                            is_main = True
-                            break
-            
-                if not final_name:
-                    for extra in EXTRA_ALLOWED_LABELS:
-                        if extra in raw_name:
-                            final_name = raw_name.title()
-                            is_main = False
-                            break
+                
+                # 2. Búsqueda Parcial (si dice "blue accent chair" -> "Sofa")
+                elif any(k in raw_name for k in CLASS_MAPPING):
+                     for k, v in CLASS_MAPPING.items():
+                         if k in raw_name:
+                             final_name = v
+                             is_main = True
+                             break
+
+                # 3. Extras
+                elif raw_name in EXTRA_ALLOWED_LABELS:
+                    final_name = EXTRA_ALLOWED_LABELS[raw_name]
+                    is_main = False
+                elif any(k in raw_name for k in EXTRA_ALLOWED_LABELS):
+                     for k, v in EXTRA_ALLOWED_LABELS.items():
+                         if k in raw_name:
+                             final_name = v
+                             is_main = False
+                             break
+                
+                # 4. Fallback (Si confiamos mucho)
+                elif conf > 0.35:
+                    final_name = raw_name.title()
+                    is_main = False
 
                 if final_name:
                     detections.append({
                         "class": final_name,
-                        "class_id": int(box.cls),
+                        "class_id": int(box.cls), 
                         "confidence": conf,
                         "is_main": is_main, 
                         "box": [float(x) for x in box.xyxy[0]]
@@ -145,19 +203,20 @@ async def save_feedback(payload: Dict[str, Any] = Body(...)):
     h, w, _ = img.shape
     label_path = os.path.join(FEEDBACK_DIR, "labels", file_id.rsplit('.', 1)[0] + ".txt")
     
+    # AL GUARDAR, UNIFICAMOS IDs
     ID_MAP = {"Sofa": 0, "Rug": 1, "Pillows": 2}
 
     with open(label_path, "w") as f:
         for item in corrected_boxes:
             cls_name = item['class']
-            cls_id = ID_MAP.get(cls_name, 0) 
-            
-            x1, y1, x2, y2 = item['box']
-            w_box = x2 - x1
-            h_box = y2 - y1
-            cx = x1 + (w_box / 2)
-            cy = y1 + (h_box / 2)
-            f.write(f"{cls_id} {cx/w:.6f} {cy/h:.6f} {w_box/w:.6f} {h_box/h:.6f}\n")
+            if cls_name in ID_MAP:
+                cls_id = ID_MAP[cls_name]
+                x1, y1, x2, y2 = item['box']
+                w_box = x2 - x1
+                h_box = y2 - y1
+                cx = x1 + (w_box / 2)
+                cy = y1 + (h_box / 2)
+                f.write(f"{cls_id} {cx/w:.6f} {cy/h:.6f} {w_box/w:.6f} {h_box/h:.6f}\n")
             
     return {"status": "saved"}
 
@@ -171,14 +230,12 @@ def background_retrain_task():
     is_training = True
     new_model_path = retrain_service.execute_retraining_cycle(CURRENT_MODEL_PATH)
     if new_model_path and os.path.exists(new_model_path):
-        old_model_path = CURRENT_MODEL_PATH
         del model
         gc.collect()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
         CURRENT_MODEL_PATH = new_model_path
         model = YOLO(CURRENT_MODEL_PATH)
-        if old_model_path != new_model_path and os.path.exists(old_model_path):
-            try: os.remove(old_model_path)
-            except: pass
+        cleanup_old_models(keep_file_path=new_model_path)
         model(np.zeros((100, 100, 3), dtype=np.uint8), verbose=False)
     is_training = False
 
