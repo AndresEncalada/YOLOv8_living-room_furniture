@@ -42,6 +42,7 @@ templates = Jinja2Templates(directory="app/templates")
 CLASS_MAPPING = {
     "sofa": "Sofa",
     "couch": "Sofa",
+    "accent chair": "Sofa",
 
     # RUG
     "rug": "Rug",
@@ -59,26 +60,25 @@ CLASS_MAPPING = {
 
 # --- CLASES EXTRA ---
 EXTRA_ALLOWED_LABELS = {
-    "chandelier": "Chandelier", # <--- TU MODELO DETECTA ESTO
+    "chandelier": "Chandelier", 
     "chandeliers": "Chandelier",
     "lamp": "Lamp",
     "floor lamp": "Lamp",
     "table lamp": "Lamp",
     "plant": "Plant",
     "plants": "Plant",
-    "plantss": "Plant", # Typo posible en dataset viejos
+    "plantss": "Plant", 
     "artificial plants": "Plant",
     "picture frame": "Decor",
     "coffee table": "Table",
     "end - side tables": "Table",
     "end table": "Table",
-    "armchair": "Arm Chair",
-    "accent chair": "Accent Chair"
+    "armchair": "Chair",
+    "accent chair": "Chair"
 }
 
 MAIN_LABELS = {"Sofa", "Rug", "Pillows"}
 
-# --- ESTADO GLOBAL ---
 model = None
 is_training = False
 CURRENT_MODEL_PATH = None
@@ -96,18 +96,18 @@ def cleanup_old_models(keep_file_path=None):
 def load_model():
     global model, CURRENT_MODEL_PATH
     
-    # 1. Buscamos modelos (Tu modelo de GitHub debería estar aquí)
+    # 1. Buscamos modelos
     custom_models = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
     
-    # Ordenamos por fecha para usar siempre el último (sea el de GitHub o uno nuevo)
+    # Ordenamos por fecha para usar siempre el último
     if custom_models:
-        # Preferimos los que empiezan por 'best_v' (nuevos), si no, el que haya
+        # Preferimos los que empiezan por 'best_v'
         latest_model = max(custom_models, key=os.path.getctime)
         CURRENT_MODEL_PATH = latest_model
-        logger.info(f"✅ Cargando MODELO PRE-ENTRENADO: {os.path.basename(latest_model)}")
+        logger.info(f" Cargando MODELO PRE-ENTRENADO: {os.path.basename(latest_model)}")
         model = YOLO(latest_model)
     else:
-        logger.warning("⚠️ No se encontró ningún modelo en /models. Descargando base...")
+        logger.warning(" No se encontró ningún modelo en /models. Descargando base...")
         CURRENT_MODEL_PATH = "yolov8m.pt"
         model = YOLO(CURRENT_MODEL_PATH)
 
@@ -144,7 +144,7 @@ async def predict_batch(files: List[UploadFile] = File(...)):
                 final_name = None
                 is_main = False 
 
-                # 1. Mapeo Inteligente (GitHub -> Tu Negocio)
+                # 1. Mapeo Inteligente
                 if raw_name in CLASS_MAPPING:
                     final_name = CLASS_MAPPING[raw_name]
                     is_main = True
