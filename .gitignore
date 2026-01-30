@@ -20,7 +20,7 @@ wandb/
 *.mp4
 *.jpg
 *.png
-
+!models/test/*.jpg
 # Ignorar pesos sueltos en cualquier carpeta
 *.pt
 
