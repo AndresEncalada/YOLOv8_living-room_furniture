@@ -12,8 +12,8 @@
         .btn-black { background-color: #0f172a; color: white; transition: all 0.3s; }
         .btn-black:hover { background-color: #1e293b; }
         .btn-black:disabled { background-color: #94a3b8; cursor: not-allowed; }
-        .btn-training { background-color: #cccccc; cursor: wait; } /* Amber for training */
-        .btn-success { background-color: #10B981; } /* Emerald for success */
+        .btn-training { background-color: #F59E0B; cursor: wait; }
+        .btn-success { background-color: #10B981; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 h-screen flex flex-col">
@@ -44,6 +44,18 @@
                     <option value="Rug">Rug</option>
                     <option value="Pillows">Pillows</option>
                 </select>
+                <div class="mt-3 text-[10px] text-slate-400">
+                    * Draw box on image to add manual label.
+                </div>
+
+                <div class="flex items-center justify-between mt-6 pt-4 border-t border-slate-100">
+                    <span class="text-xs font-medium text-slate-500">Show Hidden Objects</span>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggle-hidden" class="sr-only peer" onchange="toggleHiddenClasses()">
+                        <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                    </label>
+                </div>
+                
                 <div class="mt-4 pt-4 border-t border-slate-100">
                     <button onclick="resetData()" class="text-xs text-red-400 hover:text-red-600 underline w-full text-center">
                         Reset Feedback History
@@ -73,8 +85,20 @@
     <script>
         const CLASS_MAP = { 'Sofa': 0, 'Rug': 1, 'Pillows': 2 };
         let EDITOR_STATE = {};
-        let CURRENT_FILES = []; // STORE FILES FOR AUTO-RELOAD
+        let CURRENT_FILES = []; 
         let currentDrag = null; 
+        
+        // --- CONTROL DEL SWITCH ---
+        let SHOW_HIDDEN = false;
+
+        function toggleHiddenClasses() {
+            SHOW_HIDDEN = document.getElementById('toggle-hidden').checked;
+            // Redibujar todo con la nueva configuración
+            Object.keys(EDITOR_STATE).forEach(fileId => {
+                draw(fileId);
+                renderList(fileId, EDITOR_STATE[fileId].detections);
+            });
+        }
 
         const uploadInput = document.getElementById('image-upload');
         const workspace = document.getElementById('workspace');
@@ -82,12 +106,10 @@
         uploadInput.addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
             if(!files.length) return;
-            
-            CURRENT_FILES = files; // Save to global state
+            CURRENT_FILES = files; 
             await processImages(files);
         });
 
-        // Refactored into a reusable function
         async function processImages(files) {
             const fileMap = {};
             files.forEach(f => fileMap[f.name] = f);
@@ -107,10 +129,8 @@
             files.forEach(f => formData.append('files', f));
 
             try {
-                const res = await fetch('/api/predict?t=' + new Date().getTime(), { 
-                    method: 'POST', 
-                    body: formData 
-                });
+                // Anti-Cache
+                const res = await fetch('/api/predict?t=' + new Date().getTime(), { method: 'POST', body: formData });
                 const data = await res.json();
                 
                 workspace.innerHTML = ''; 
@@ -125,101 +145,6 @@
             }
         }
 
-        // --- RETRAIN LOGIC (SILENT & AUTO-RELOAD) ---
-        window.triggerRetrain = async () => {
-            // Check if we have feedback before training? Optional, but good practice.
-            // For now, we trust the user.
-
-            const btn = document.getElementById('btn-retrain');
-            const btnText = document.getElementById('btn-text');
-            const iconRetrain = document.getElementById('icon-retrain');
-            const iconLoading = document.getElementById('icon-loading');
-
-            // UI Loading State
-            btn.disabled = true;
-            btn.classList.remove('btn-black');
-            btn.classList.add('btn-training');
-            btnText.innerText = "Training Model...";
-            iconRetrain.classList.add('hidden');
-            iconLoading.classList.remove('hidden');
-            
-            try {
-                const res = await fetch('/api/retrain', { method: 'POST' });
-                if(res.ok) {
-                    pollStatus();
-                } else {
-                    throw new Error("API Error");
-                }
-            } catch(e) { 
-                resetButtonUI("Error", true);
-            }
-        };
-
-        async function pollStatus() {
-            const interval = setInterval(async () => {
-                try {
-                    const res = await fetch('/api/status');
-                    const data = await res.json();
-                    
-                    if(!data.training_active) {
-                        clearInterval(interval);
-                        
-                        // Training Finished
-                        resetButtonUI("Success! Reloading...", false);
-                        
-                        // AUTO-RELOAD RESULTS
-                        if (CURRENT_FILES.length > 0) {
-                            setTimeout(() => {
-                                processImages(CURRENT_FILES);
-                                // Reset button text after reload starts
-                                setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
-                            }, 1000);
-                        } else {
-                            setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
-                        }
-                    }
-                } catch(e) {
-                    clearInterval(interval);
-                    resetButtonUI("Connection Error", true);
-                }
-            }, 1500); // Check every 1.5s
-        }
-
-        function resetButtonUI(text, isError, isReset = false) {
-            const btn = document.getElementById('btn-retrain');
-            const btnText = document.getElementById('btn-text');
-            const iconRetrain = document.getElementById('icon-retrain');
-            const iconLoading = document.getElementById('icon-loading');
-
-            iconLoading.classList.add('hidden');
-            
-            if (isReset) {
-                btn.className = "btn-black w-full font-medium py-3 rounded-lg shadow-md flex justify-center items-center gap-2";
-                btnText.innerText = text;
-                iconRetrain.classList.remove('hidden');
-                btn.disabled = false;
-            } else if (isError) {
-                btn.className = "w-full bg-red-500 text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
-                btnText.innerText = text;
-                setTimeout(() => resetButtonUI("Start Retraining", false, true), 3000);
-            } else {
-                // Success State
-                btn.className = "btn-success w-full text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
-                btnText.innerText = text;
-                // Note: The timer to reset this is handled in the pollStatus function
-            }
-        }
-
-        // --- RESET DATA ---
-        window.resetData = async () => {
-            if(!confirm("⚠️ Delete all feedback history?")) return;
-            try {
-                await fetch('/api/reset', { method: 'POST' });
-                alert("History cleared.");
-            } catch(e) { alert("Error resetting data"); }
-        };
-
-        // --- RENDER & CANVAS LOGIC (UNCHANGED) ---
         function renderEditorCard(item, fileObj) {
             const card = document.createElement('div');
             card.className = "w-full max-w-6xl bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden flex flex-col lg:flex-row flex-shrink-0";
@@ -286,54 +211,16 @@
             draw(fileId);
         }
 
-        function getMousePos(canvas, evt) {
-            const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width;
-            const scaleY = canvas.height / rect.height;
-            return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
-        }
-
-        function startDrawing(e, fileId) {
-            const pos = getMousePos(e.target, e);
-            currentDrag = { fileId, startX: pos.x, startY: pos.y, currX: pos.x, currY: pos.y };
-        }
-
-        function drawMove(e, fileId) {
-            if (!currentDrag || currentDrag.fileId !== fileId) return;
-            const pos = getMousePos(e.target, e);
-            currentDrag.currX = pos.x;
-            currentDrag.currY = pos.y;
-            draw(fileId);
-        }
-
-        function endDrawing(e, fileId) {
-            if (!currentDrag || currentDrag.fileId !== fileId) return;
-            const x1 = Math.min(currentDrag.startX, currentDrag.currX);
-            const y1 = Math.min(currentDrag.startY, currentDrag.currY);
-            const x2 = Math.max(currentDrag.startX, currentDrag.currX);
-            const y2 = Math.max(currentDrag.startY, currentDrag.currY);
-            const baseSize = Math.max(EDITOR_STATE[fileId].img.width, EDITOR_STATE[fileId].img.height);
-            const minSize = baseSize * 0.02; 
-            
-            if ((x2 - x1) > minSize && (y2 - y1) > minSize) {
-                const selectedClass = document.getElementById('active-class-selector').value;
-                const classId = CLASS_MAP[selectedClass] || 0;
-                EDITOR_STATE[fileId].detections.push({
-                    class: selectedClass, class_id: classId, confidence: 1.0, box: [x1, y1, x2, y2]
-                });
-                renderList(fileId, EDITOR_STATE[fileId].detections);
-            }
-            currentDrag = null;
-            draw(fileId);
-        }
-
+        // --- DRAWING LOGIC (With Visibility Filter) ---
         function draw(fileId) {
             const state = EDITOR_STATE[fileId];
             const ctx = state.canvas.getContext('2d');
             ctx.clearRect(0, 0, state.canvas.width, state.canvas.height);
             ctx.drawImage(state.img, 0, 0);
+
             const baseSize = Math.max(state.img.width, state.img.height);
             const scale = Math.max(0.5, baseSize / 1000);
+
             const drawBox = (box, label, color, isDashed=false) => {
                 const [x1, y1, x2, y2] = box;
                 const w = x2 - x1;
@@ -353,15 +240,21 @@
                     ctx.fillText(label, x1 + padding, y1 - padding);
                 }
             };
+
             state.detections.forEach(det => {
-                let color = '#2563EB'; 
-                const cls = det.class.toLowerCase();
-                if (cls.includes('rug')) color = '#10B981'; 
-                if (cls.includes('sofa')) color = '#F59E0B'; 
-                if (cls.includes('pillow')) color = '#8B5CF6'; 
+                // 1. FILTRO: Si no está activo el switch y la clase es oculta, saltar
+                if (!SHOW_HIDDEN && !det.is_main) return;
+
+                let color = '#94a3b8'; // GRIS POR DEFECTO (Hidden)
+                
+                if (det.class === 'Sofa') color = '#F59E0B';    
+                if (det.class === 'Rug') color = '#10B981';     
+                if (det.class === 'Pillows') color = '#8B5CF6'; 
+
                 const label = `${det.class} ${Math.round(det.confidence*100)}%`;
                 drawBox(det.box, label, color);
             });
+
             if (currentDrag && currentDrag.fileId === fileId) {
                 const x = Math.min(currentDrag.startX, currentDrag.currX);
                 const y = Math.min(currentDrag.startY, currentDrag.currY);
@@ -372,24 +265,35 @@
             }
         }
 
+        // --- LIST LOGIC (With Visibility Filter) ---
         function renderList(fileId, detections) {
             const container = document.getElementById(`list-${fileId}`);
             container.innerHTML = '';
-            if(detections.length === 0) {
+
+            // Filtrar visualmente la lista
+            const visibleDetections = detections.filter(d => SHOW_HIDDEN || d.is_main);
+
+            if(visibleDetections.length === 0) {
                 container.innerHTML = `
                     <div class="flex flex-col items-center justify-center h-32 text-center border-2 border-dashed border-red-200 bg-red-50 rounded-lg">
-                        <span class="text-red-600 font-bold text-sm">No furniture detected</span>
-                        <span class="text-red-400 text-xs mt-1">Please add manual labels</span>
+                        <span class="text-red-600 font-bold text-sm">No items visible</span>
+                        <span class="text-red-400 text-xs mt-1">Try toggling hidden classes</span>
                     </div>`;
                 return;
             }
+            
+            // Renderizar usando el índice original para que el botón de borrar funcione
             detections.forEach((det, idx) => {
+                if (!SHOW_HIDDEN && !det.is_main) return; // Skip hidden
+
                 const row = document.createElement('div');
-                row.className = "bg-slate-50 p-2 rounded border border-slate-200 flex items-center justify-between text-sm";
+                const isHiddenStyle = !det.is_main ? 'bg-slate-200 text-slate-500 border-slate-300' : 'bg-slate-50 text-slate-700 border-slate-200';
+                
+                row.className = `${isHiddenStyle} p-2 rounded border flex items-center justify-between text-sm`;
                 row.innerHTML = `
                     <div class="flex flex-col">
-                        <span class="font-bold text-slate-700">${det.class}</span>
-                        <span class="text-xs text-slate-500">${Math.round(det.confidence*100)}% Conf</span>
+                        <span class="font-bold">${det.class}</span>
+                        <span class="text-xs opacity-75">${Math.round(det.confidence*100)}% Conf</span>
                     </div>
                     <button onclick="deleteBox('${fileId}', ${idx})" class="text-red-500 hover:text-red-700 p-1" title="Remove">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
@@ -399,12 +303,49 @@
             });
         }
 
+        // ... (Resto de funciones deleteBox, saveCorrection, etc. sin cambios) ...
+        function getMousePos(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+        }
+        function startDrawing(e, fileId) {
+            const pos = getMousePos(e.target, e);
+            currentDrag = { fileId, startX: pos.x, startY: pos.y, currX: pos.x, currY: pos.y };
+        }
+        function drawMove(e, fileId) {
+            if (!currentDrag || currentDrag.fileId !== fileId) return;
+            const pos = getMousePos(e.target, e);
+            currentDrag.currX = pos.x;
+            currentDrag.currY = pos.y;
+            draw(fileId);
+        }
+        function endDrawing(e, fileId) {
+            if (!currentDrag || currentDrag.fileId !== fileId) return;
+            const x1 = Math.min(currentDrag.startX, currentDrag.currX);
+            const y1 = Math.min(currentDrag.startY, currentDrag.currY);
+            const x2 = Math.max(currentDrag.startX, currentDrag.currX);
+            const y2 = Math.max(currentDrag.startY, currentDrag.currY);
+            const baseSize = Math.max(EDITOR_STATE[fileId].img.width, EDITOR_STATE[fileId].img.height);
+            const minSize = baseSize * 0.02; 
+            
+            if ((x2 - x1) > minSize && (y2 - y1) > minSize) {
+                const selectedClass = document.getElementById('active-class-selector').value;
+                const classId = CLASS_MAP[selectedClass] || 0;
+                EDITOR_STATE[fileId].detections.push({
+                    class: selectedClass, class_id: classId, confidence: 1.0, is_main: true, box: [x1, y1, x2, y2]
+                });
+                renderList(fileId, EDITOR_STATE[fileId].detections);
+            }
+            currentDrag = null;
+            draw(fileId);
+        }
         window.deleteBox = (fileId, idx) => {
             EDITOR_STATE[fileId].detections.splice(idx, 1);
             draw(fileId);
             renderList(fileId, EDITOR_STATE[fileId].detections);
         };
-
         window.saveCorrection = async (fileId) => {
             const state = EDITOR_STATE[fileId];
             const btn = document.querySelector(`button[onclick="saveCorrection('${fileId}')"]`);
@@ -423,6 +364,67 @@
                 btn.innerText = "Confirm & Save";
                 btn.disabled = false;
             }
+        };
+        window.triggerRetrain = async () => {
+            const btn = document.getElementById('btn-retrain');
+            const btnText = document.getElementById('btn-text');
+            const iconRetrain = document.getElementById('icon-retrain');
+            const iconLoading = document.getElementById('icon-loading');
+            btn.disabled = true;
+            btn.classList.remove('btn-black');
+            btn.classList.add('btn-training');
+            btnText.innerText = "Training Model...";
+            iconRetrain.classList.add('hidden');
+            iconLoading.classList.remove('hidden');
+            try {
+                const res = await fetch('/api/retrain', { method: 'POST' });
+                if(res.ok) { pollStatus(); } else { throw new Error("API Error"); }
+            } catch(e) { resetButtonUI("Error", true); }
+        };
+        async function pollStatus() {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/status');
+                    const data = await res.json();
+                    if(!data.training_active) {
+                        clearInterval(interval);
+                        resetButtonUI("Success! Reloading...", false);
+                        if (CURRENT_FILES.length > 0) {
+                            setTimeout(() => {
+                                processImages(CURRENT_FILES);
+                                setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
+                            }, 1000);
+                        } else {
+                            setTimeout(() => resetButtonUI("Start Retraining", false, true), 2000);
+                        }
+                    }
+                } catch(e) { clearInterval(interval); resetButtonUI("Connection Error", true); }
+            }, 1500);
+        }
+        function resetButtonUI(text, isError, isReset = false) {
+            const btn = document.getElementById('btn-retrain');
+            const btnText = document.getElementById('btn-text');
+            const iconRetrain = document.getElementById('icon-retrain');
+            const iconLoading = document.getElementById('icon-loading');
+            iconLoading.classList.add('hidden');
+            if (isReset) {
+                btn.className = "btn-black w-full font-medium py-3 rounded-lg shadow-md flex justify-center items-center gap-2";
+                btnText.innerText = text;
+                iconRetrain.classList.remove('hidden');
+                btn.disabled = false;
+            } else if (isError) {
+                btn.className = "w-full bg-red-500 text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
+                btnText.innerText = text;
+                setTimeout(() => resetButtonUI("Start Retraining", false, true), 3000);
+            } else {
+                btn.className = "btn-success w-full text-white font-medium py-3 rounded-lg shadow flex justify-center items-center gap-2";
+                btnText.innerText = text;
+            }
+        }
+        window.resetData = async () => {
+            if(!confirm("⚠️ Delete all feedback history?")) return;
+            try { await fetch('/api/reset', { method: 'POST' }); alert("History cleared."); } 
+            catch(e) { alert("Error resetting data"); }
         };
     </script>
 </body>

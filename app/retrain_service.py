@@ -87,8 +87,8 @@ def execute_retraining_cycle(current_model_path):
         model = YOLO(current_model_path)
         model.train(
             data=yaml_path,
-            epochs=50,       
-            imgsz=480,
+            epochs=25,       
+            imgsz=640,
             batch=8,
             device=USE_DEVICE,
             name='retrain_run',

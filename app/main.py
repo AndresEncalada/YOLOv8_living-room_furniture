@@ -20,8 +20,7 @@ class EndpointFilter(logging.Filter):
         return "/api/status" not in record.getMessage()
 logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
-# --- CONFIG ---
-app = FastAPI(title="Furniture Detection System", version="3.5.0")
+app = FastAPI(title="Furniture Detection System", version="3.7.0")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("API")
 
@@ -34,19 +33,27 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(os.path.join(FEEDBACK_DIR, "images"), exist_ok=True)
 os.makedirs(os.path.join(FEEDBACK_DIR, "labels"), exist_ok=True)
 
-TARGET_CLASSES = {
-    "sofa", "sofas", "rug", "rugs", 
-    "pillow", "pillows", "pillowss", "cushion", "cushions"
-}
-
 templates = Jinja2Templates(directory="app/templates")
 
-# --- GLOBAL STATE ---
-# Initial search for any .pt file in models/
-initial_models = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
-# If exists, take the last one, else assume best.pt
-CURRENT_MODEL_PATH = initial_models[-1] if initial_models else os.path.join(MODEL_DIR, "best.pt")
+CLASS_MAPPING = {
+    "sofa": "Sofa", "sofas": "Sofa", "couch": "Sofa",
+    "accent chair": "Sofa", "armchair": "Sofa", "chair": "Sofa",
+    "loveseat": "Sofa", "bench": "Sofa", "stool": "Sofa",
+    "rug": "Rug", "rugs": "Rug", "carpet": "Rug", "mat": "Rug",
+    "pillow": "Pillows", "pillows": "Pillows", "pillowss": "Pillows",
+    "cushion": "Pillows", "cushions": "Pillows"
+}
 
+EXTRA_ALLOWED_LABELS = {
+    "chandelier", "chandeliers",
+    "lamp", "table lamp", "floor lamp",
+    "plant", "artificial plants",
+    "picture frame", "curtain", "curtains"
+}
+
+# State vars
+initial_models = glob.glob(os.path.join(MODEL_DIR, "*.pt"))
+CURRENT_MODEL_PATH = initial_models[-1] if initial_models else os.path.join(MODEL_DIR, "best.pt")
 model = None
 is_training = False
 
@@ -73,7 +80,6 @@ async def predict_batch(files: List[UploadFile] = File(...)):
         file_ext = file.filename.split('.')[-1]
         file_id = f"{uuid.uuid4()}.{file_ext}"
         temp_path = os.path.join(TEMP_DIR, file_id)
-        
         with open(temp_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
@@ -81,16 +87,40 @@ async def predict_batch(files: List[UploadFile] = File(...)):
         img = cv2.imread(temp_path)
         if img is None: continue
             
-        results = model(img)
+        results = model(img, conf=0.10, iou=0.5)
+        
         detections = []
         for r in results:
             for box in r.boxes:
-                class_name = model.names[int(box.cls)]
-                if class_name.lower() in TARGET_CLASSES:
+                raw_name = model.names[int(box.cls)].lower()
+                conf = float(box.conf)
+                
+                final_name = None
+                is_main = False 
+
+                if raw_name in CLASS_MAPPING:
+                    final_name = CLASS_MAPPING[raw_name]
+                    is_main = True
+                else:
+                    for key, target in CLASS_MAPPING.items():
+                        if key in raw_name:
+                            final_name = target
+                            is_main = True
+                            break
+            
+                if not final_name:
+                    for extra in EXTRA_ALLOWED_LABELS:
+                        if extra in raw_name:
+                            final_name = raw_name.title()
+                            is_main = False
+                            break
+
+                if final_name:
                     detections.append({
-                        "class": class_name,
+                        "class": final_name,
                         "class_id": int(box.cls),
-                        "confidence": float(box.conf),
+                        "confidence": conf,
+                        "is_main": is_main, 
                         "box": [float(x) for x in box.xyxy[0]]
                     })
 
@@ -115,10 +145,14 @@ async def save_feedback(payload: Dict[str, Any] = Body(...)):
     h, w, _ = img.shape
     label_path = os.path.join(FEEDBACK_DIR, "labels", file_id.rsplit('.', 1)[0] + ".txt")
     
+    ID_MAP = {"Sofa": 0, "Rug": 1, "Pillows": 2}
+
     with open(label_path, "w") as f:
         for item in corrected_boxes:
+            cls_name = item['class']
+            cls_id = ID_MAP.get(cls_name, 0) 
+            
             x1, y1, x2, y2 = item['box']
-            cls_id = item['class_id']
             w_box = x2 - x1
             h_box = y2 - y1
             cx = x1 + (w_box / 2)
@@ -129,38 +163,23 @@ async def save_feedback(payload: Dict[str, Any] = Body(...)):
 
 @app.post("/api/reset")
 def reset_dataset():
-    if retrain_service.clear_feedback_data():
-        return {"status": "cleared"}
-    else:
-        raise HTTPException(500, "Failed to clear")
+    if retrain_service.clear_feedback_data(): return {"status": "cleared"}
+    else: raise HTTPException(500, "Failed to clear")
 
-# --- DYNAMIC RELOAD LOGIC ---
 def background_retrain_task():
     global is_training, model, CURRENT_MODEL_PATH
     is_training = True
-    
-    logger.info(f"Retraining base on: {os.path.basename(CURRENT_MODEL_PATH)}")
     new_model_path = retrain_service.execute_retraining_cycle(CURRENT_MODEL_PATH)
-    
     if new_model_path and os.path.exists(new_model_path):
-        logger.info(f"Switching to NEW model: {os.path.basename(new_model_path)}")
         old_model_path = CURRENT_MODEL_PATH
         del model
         gc.collect()
         CURRENT_MODEL_PATH = new_model_path
         model = YOLO(CURRENT_MODEL_PATH)
         if old_model_path != new_model_path and os.path.exists(old_model_path):
-            try:
-                os.remove(old_model_path)
-                logger.info("Old model file deleted.")
-            except:
-                pass
-                
-        # Warmup
+            try: os.remove(old_model_path)
+            except: pass
         model(np.zeros((100, 100, 3), dtype=np.uint8), verbose=False)
-    else:
-        logger.error("Retraining returned no new path.")
-        
     is_training = False
 
 @app.post("/api/retrain")
@@ -171,5 +190,4 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
     return {"status": "Accepted"}
 
 @app.get("/api/status")
-def get_status():
-    return {"training_active": is_training}
+def get_status(): return {"training_active": is_training}
