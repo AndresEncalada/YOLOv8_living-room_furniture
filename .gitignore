@@ -25,4 +25,4 @@ wandb/
 *.pt
 
 # Permitir explícitamente modelo final
-!models/best.pt
+!models/best_v1.pt
