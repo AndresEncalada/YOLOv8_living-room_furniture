@@ -11,5 +11,6 @@ python-multipart
 sqlalchemy
 jinja2
 ipykernel
-opencv-python-headless
 pyyaml
+pydantic
+requests

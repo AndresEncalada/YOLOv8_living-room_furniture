@@ -34,7 +34,7 @@ if %errorlevel% neq 0 (
 )
 
 :: 5. Model Integrity Check
-if not exist "models\best_v1.pt" (
+if not exist "models\best.pt" (
     echo.
     echo [CRITICAL ERROR] Model 'models\best_v1.pt' not found!
     echo ---------------------------------------------------
@@ -44,7 +44,7 @@ if not exist "models\best_v1.pt" (
     pause
     exit /b
 ) else (
-    echo [INFO] Base model 'best_v1.pt' found. Ready to launch.
+    echo [INFO] Base model 'best.pt' found. Ready to launch.
 )
 
 :: 6. Start Application Server

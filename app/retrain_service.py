@@ -2,10 +2,9 @@ import os
 import random
 import shutil
 import yaml
-import glob
 import mlflow
-import torch
 import logging
+import glob
 from ultralytics import YOLO
 
 # --- CONFIGURACIÓN ---
@@ -13,139 +12,78 @@ logger = logging.getLogger("RetrainService")
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Rutas clave
-TEMP_DIR = os.path.join(BASE_DIR, "data", "temp_uploads")
 FEEDBACK_DIR = os.path.join(BASE_DIR, "data", "feedback_dataset")
-BASE_DATASET_DIR = os.path.join(BASE_DIR, "data", "base_dataset") 
+PROCESSED_DATASET_DIR = os.path.join(BASE_DIR, "data", "processed_dataset")
 TEMP_YOLO_DIR = os.path.join(BASE_DIR, "data", "yolo_retrain_work")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+SUBSET_DIR = os.path.join(BASE_DIR, "data", "temp_subset_dataset")
 
-MLFLOW_DB = "sqlite:///mlflow.db"
+# --- CONFIGURACIÓN MLFLOW (CORREGIDA) ---
+# Forzamos que los artifacts se guarden en la raíz, no en Notebooks/
+MLFLOW_ARTIFACTS_PATH = os.path.join(BASE_DIR, "mlruns")
 REGISTERED_MODEL_NAME = "Furniture_Model_YOLO"
 
-USE_DEVICE = 0 if torch.cuda.is_available() else 'cpu'
+# --- 1. GESTOR DE VERSIONES ---
+def get_next_version_path():
+    if not os.path.exists(MODELS_DIR): os.makedirs(MODELS_DIR)
+    counter = 2
+    while True:
+        filename = f"best_v{counter}.pt"
+        full_path = os.path.join(MODELS_DIR, filename)
+        if not os.path.exists(full_path): return full_path, filename
+        counter += 1
 
-# --- MAPA DE CLASES (TRADUCCIÓN) ---
-TARGET_CLASSES = {
-    0: ['sofa', 'couch', 'loveseat', 'settee'],    
-    1: ['rug', 'carpet', 'mat', 'floor mat'],      
-    2: ['pillow', 'cushion', 'throw pillow']       
-}
-
-# --- 1. DETECTOR DE IDs ---
-def build_class_mapping(dataset_path):
-    yaml_files = glob.glob(os.path.join(dataset_path, "data.yaml"))
-    if not yaml_files:
-        yaml_files = glob.glob(os.path.join(dataset_path, "*", "data.yaml"))
+# --- 2. PREPARAR SUBSET ---
+def prepare_subset_dataset(limit=None):
+    train_src = os.path.join(PROCESSED_DATASET_DIR, "train", "images")
+    valid_src = os.path.join(PROCESSED_DATASET_DIR, "valid", "images")
     
-    if not yaml_files: return {0:0, 1:1, 2:2}
+    if not limit:
+        return train_src, valid_src
 
-    yaml_path = yaml_files[0]
-    with open(yaml_path, 'r') as f: data = yaml.safe_load(f)
+    logger.info(f"✂️ Creando subset de entrenamiento limitado a {limit} imágenes...")
+    
+    if os.path.exists(SUBSET_DIR): shutil.rmtree(SUBSET_DIR)
+    subset_train_imgs = os.path.join(SUBSET_DIR, "train", "images")
+    subset_train_lbls = os.path.join(SUBSET_DIR, "train", "labels")
+    os.makedirs(subset_train_imgs, exist_ok=True)
+    os.makedirs(subset_train_lbls, exist_ok=True)
+
+    all_images = glob.glob(os.path.join(train_src, "*.jpg"))
+    if not all_images: return None, None
+    
+    selected_images = random.sample(all_images, min(limit, len(all_images)))
+    
+    for img_path in selected_images:
+        basename = os.path.basename(img_path)
+        lbl_path = os.path.join(PROCESSED_DATASET_DIR, "train", "labels", basename.replace('.jpg', '.txt'))
         
-    original_names = data.get('names', [])
-    id_map = {}
-    
-    iterator = original_names.items() if isinstance(original_names, dict) else enumerate(original_names)
-
-    for orig_id, orig_name in iterator:
-        orig_name_clean = orig_name.lower().strip()
-        for target_id, synonyms in TARGET_CLASSES.items():
-            if any(syn in orig_name_clean for syn in synonyms):
-                id_map[orig_id] = target_id
-                break
-    return id_map
-
-# --- 2. SANITIZADOR ---
-def sanitize_labels(dataset_root):
-    """
-    Versión protegida: Traduce IDs originales O respeta IDs ya procesados.
-    """
-    # Tu mapa de IDs originales
-    ID_MAP = {12: 0, 11: 1, 19: 2}
-    # IDs que ya están bien y no queremos borrar
-    ALLOWED_IDS = [0, 1, 2]
-
-    label_files = glob.glob(os.path.join(dataset_root, "**", "labels", "*.txt"), recursive=True)
-    
-    for txt_file in label_files:
-        try:
-            with open(txt_file, 'r') as f:
-                lines = f.readlines()
+        shutil.copy(img_path, os.path.join(subset_train_imgs, basename))
+        if os.path.exists(lbl_path):
+            shutil.copy(lbl_path, os.path.join(subset_train_lbls, basename.replace('.jpg', '.txt')))
             
-            new_lines = []
-            for line in lines:
-                parts = line.split()
-                if not parts: continue
-                
-                cls_id = int(parts[0])
-                
-                # CASO A: Es un ID original (11, 12, 19) -> Traducir
-                if cls_id in ID_MAP:
-                    new_id = ID_MAP[cls_id]
-                    new_lines.append(f"{new_id} {' '.join(parts[1:])}\n")
-                
-                # CASO B: Ya es un ID corregido (0, 1, 2) -> Mantener
-                elif cls_id in ALLOWED_IDS:
-                    new_lines.append(line)
-            
-            # Solo sobreescribir si el archivo cambió para no corromper fechas
-            with open(txt_file, 'w') as f:
-                f.writelines(new_lines)
-        except:
-            pass
+    return subset_train_imgs, valid_src
 
-# --- 3. BUSCADOR DE CARPETAS ---
-def find_dataset_folders():
-    """Devuelve tupla (ruta_train, ruta_valid)"""
-    train_path = None
-    valid_path = None
-    root_found = None
-
-    # Buscar raíz
-    if os.path.exists(os.path.join(BASE_DATASET_DIR, "train")):
-        root_found = BASE_DATASET_DIR
-    elif os.path.exists(BASE_DATASET_DIR):
-        for item in os.listdir(BASE_DATASET_DIR):
-            sub = os.path.join(BASE_DATASET_DIR, item)
-            if os.path.isdir(sub) and os.path.exists(os.path.join(sub, "train")):
-                root_found = sub
-                break
-    
-    if root_found:
-        # Sanitizar TODO el directorio encontrado (train y valid)
-        sanitize_labels(root_found)
-        
-        # Definir rutas específicas
-        t = os.path.join(root_found, "train", "images")
-        v = os.path.join(root_found, "valid", "images")
-        
-        if os.path.exists(t): train_path = t
-        if os.path.exists(v): valid_path = v
-        
-        # Si no existe valid, usamos train (fallback, pero intentamos evitarlo)
-        if not valid_path: valid_path = train_path
-
-    return train_path, valid_path
-
-def generate_mixed_yaml(feedback_multiplier=5):
+# --- 3. GENERADOR DE YAML ---
+def generate_mixed_yaml(feedback_multiplier=2, data_limit=None):
     yaml_path = os.path.join(TEMP_YOLO_DIR, "mixed_training.yaml")
     feedback_imgs = os.path.join(FEEDBACK_DIR, "images")
     
-    base_train, base_valid = find_dataset_folders()
+    base_train, base_valid = prepare_subset_dataset(data_limit)
     
-    # Fuentes de ENTRENAMIENTO (Feedback + Base Train)
-    train_sources = [feedback_imgs]* feedback_multiplier
-    if base_train: train_sources.append(base_train)
+    if not base_train:
+        raise FileNotFoundError("No se encontró el dataset base.")
+
+    train_sources = [base_train]
     
-    # Fuentes de VALIDACIÓN
-    val_sources = [base_valid] if base_valid else train_sources 
-
-    logger.info(f"📁 Train Sources: {train_sources}")
-    logger.info(f"📁 Valid Sources: {val_sources}")
-
+    if os.path.exists(feedback_imgs) and len(os.listdir(feedback_imgs)) > 0:
+        logger.info(f"♻️ Incorporando feedback (x{feedback_multiplier})...")
+        train_sources.extend([feedback_imgs] * feedback_multiplier)
+    
     data_config = {
         'path': '', 
         'train': train_sources,
-        'val': val_sources,  # <--- AQUÍ ESTÁ EL CAMBIO CRÍTICO
+        'val': base_valid,
         'nc': 3,
         'names': {0: 'Sofa', 1: 'Rug', 2: 'Pillows'}
     }
@@ -156,65 +94,82 @@ def generate_mixed_yaml(feedback_multiplier=5):
         
     return yaml_path
 
-def clear_feedback_data():
-    try:
-        if os.path.exists(FEEDBACK_DIR): shutil.rmtree(FEEDBACK_DIR)
-        os.makedirs(os.path.join(FEEDBACK_DIR, "images"), exist_ok=True)
-        os.makedirs(os.path.join(FEEDBACK_DIR, "labels"), exist_ok=True)
-        return True
-    except: return False
-
-def execute_retraining_cycle(base_model_path):
+# --- 4. CICLO DE ENTRENAMIENTO ---
+def execute_retraining_cycle(base_model_path, data_limit=None):
     try:
         if mlflow.active_run(): mlflow.end_run()
 
-        logger.info("Iniciando ciclo de Retraining...")
-        train_yaml = generate_mixed_yaml()
+        logger.info(f"🚀 Iniciando Retraining (Límite: {data_limit})...")
         
+        train_yaml = generate_mixed_yaml(data_limit=data_limit)
+        
+        if not os.path.exists(base_model_path):
+            logger.error(f"Modelo base no encontrado: {base_model_path}")
+            return None
+            
         model = YOLO(base_model_path)
         
-        mlflow.set_tracking_uri(MLFLOW_DB)
-        mlflow.set_experiment("Furniture_Continuous_Learning")
+        # --- CONFIGURACIÓN MLFLOW ROBUSTA ---
+        db_path = os.path.join(BASE_DIR, "mlflow.db")
+        mlflow.set_tracking_uri(f"sqlite:///{db_path.replace(os.sep, '/')}")
         
-        with mlflow.start_run(run_name="Retrain_Real_Val") as run:
-            logger.info(" Entrenando...")
-            nueva_seed = random.randint(1, 1000000)
+        experiment_name = "Furniture_Continuous_Learning"
+        
+        # INTENTO DE CREACIÓN EXPLÍCITA CON RUTA CORRECTA
+        try:
+            mlflow.create_experiment(
+                name=experiment_name,
+                artifact_location=f"file:///{MLFLOW_ARTIFACTS_PATH.replace(os.sep, '/')}"
+            )
+            logger.info(f"✅ Experimento creado apuntando a: {MLFLOW_ARTIFACTS_PATH}")
+        except:
+            # Si ya existe, verificamos si está bien configurado (opcional) o seguimos
+            pass
+
+        mlflow.set_experiment(experiment_name)
+        
+        dst_weights_path, new_filename = get_next_version_path()
+        run_name_dynamic = f"Retrain_{new_filename.replace('.pt', '')}"
+
+        with mlflow.start_run(run_name=run_name_dynamic) as run:
+            logger.info(f"🏋️‍♂️ Entrenando... Destino: {new_filename}")
+            
             model.train(
                 data=train_yaml,
-                epochs=5, 
-                warmup_epochs=1,
-                seed=nueva_seed,
-                lr0=0.001,
-                lrf=0.01,
-                freeze=0,
-                batch=8,
+                epochs=2,
                 imgsz=640,
+                batch=16,
                 project=TEMP_YOLO_DIR,
                 name='retrain_run',
                 exist_ok=True,
-                verbose=True,
+                lr0=0.0001,
+                lrf=0.1,
+                dropout=0.0,
+                mosaic=0.5,
                 plots=False,
-                close_mosaic=0,
-                mosaic=1.0,
-                mixup=0.2,
-                cls=2.0,
-                scale=0.6,
-                copy_paste=0.1,
-                degrees=10
+                verbose=True,
+                val=True,
+                warmup_epochs=0,
+                workers=0
             )
             
             metrics = model.metrics
             map50 = metrics.box.map50
-            logger.info(f" Nuevo mAP50: {map50:.4f}")
-            mlflow.log_metric("map50", map50)
+            logger.info(f"📈 Nuevo mAP50: {map50:.4f}")
             
-            weights_path = os.path.join(TEMP_YOLO_DIR, "retrain_run", "weights", "best.pt")
-            mlflow.log_artifact(weights_path, artifact_path="weights")
+            src_weights = os.path.join(TEMP_YOLO_DIR, "retrain_run", "weights", "best.pt")
+            shutil.copy(src_weights, dst_weights_path)
+            
+            mlflow.log_metric("map50", map50)
+            mlflow.log_artifact(dst_weights_path, artifact_path="weights")
             
             client = mlflow.tracking.MlflowClient()
-            client.create_model_version(
+            try: client.create_registered_model(REGISTERED_MODEL_NAME)
+            except: pass
+            
+            mv = client.create_model_version(
                 name=REGISTERED_MODEL_NAME,
-                source=f"runs:/{run.info.run_id}/weights",
+                source=f"runs:/{run.info.run_id}/weights/{new_filename}",
                 run_id=run.info.run_id
             )
             
@@ -222,4 +177,6 @@ def execute_retraining_cycle(base_model_path):
 
     except Exception as e:
         logger.error(f"❌ Error en retraining: {e}")
+        import traceback
+        traceback.print_exc()
         return None

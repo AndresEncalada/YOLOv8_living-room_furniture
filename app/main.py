@@ -70,7 +70,7 @@ def process_prediction(model_ref, img, file_id, original_name):
     """
     is_generic_model = len(model_ref.names) > 10 
     
-    results = model_ref(img, conf=0.25, iou=0.5)
+    results = model_ref(img, conf=0.10, iou=0.5)
     
     detections = []
     for r in results:
@@ -307,7 +307,13 @@ def retrain_task_wrapper(temp_model_path):
     global is_training, model
     is_training = True
     try:
-        new_run_id = retrain_service.execute_retraining_cycle(temp_model_path)
+        LIMIT_FOR_DEMO = 50
+        
+        new_run_id = retrain_service.execute_retraining_cycle(
+            temp_model_path, 
+            data_limit=LIMIT_FOR_DEMO
+        )
+
         if new_run_id:
             mlflow.set_tracking_uri(MLFLOW_DB)
             client = MlflowClient()
