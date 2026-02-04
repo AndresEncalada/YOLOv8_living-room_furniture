@@ -1,8 +1,8 @@
-# Sistema de Detección de Mobiliario con Aprendizaje Continuo
+# Furniture Detection System with Continuous Learning
 
-Este proyecto implementa una solución de **Visión Artificial** end-to-end para la detección de mobiliario (Sofás, Alfombras, Cojines) en salas de estar. A diferencia de un modelo estático, este sistema integra un ciclo de **MLOps** y **Aprendizaje Activo (Active Learning)**, permitiendo que el modelo mejore automáticamente mediante el feedback de los usuarios.
+This project implements an end-to-end **Computer Vision** solution for detecting furniture (Sofas, Rugs, Cushions) in living rooms. Unlike a static model, this system integrates an **MLOps** cycle and **Active Learning**, allowing the model to improve automatically through user feedback.
 
-## Tecnologías y Librerías Utilizadas
+## Technologies and Libraries Used
 
 ![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
 ![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=for-the-badge&logo=PyTorch&logoColor=white)
@@ -13,62 +13,62 @@ Este proyecto implementa una solución de **Visión Artificial** end-to-end para
 ![Pandas](https://img.shields.io/badge/pandas-%23150458.svg?style=for-the-badge&logo=pandas&logoColor=white)
 ![Jinja2](https://img.shields.io/badge/Jinja2-B41717?style=for-the-badge&logo=jinja&logoColor=white)
 
-* **Ultralytics YOLOv8:** Modelo base para la detección de objetos.
-* **FastAPI & Uvicorn:** Servidor asíncrono para exponer el modelo vía REST API.
-* **MLflow:** Gestión del ciclo de vida del modelo, registro de experimentos y versionado.
-* **Roboflow:** Gestión y versionado del dataset original.
-* **OpenCV & Matplotlib:** Procesamiento de imágenes y visualización.
+* **Ultralytics YOLOv8:** Base model for object detection.
+* **FastAPI & Uvicorn:** Asynchronous server to expose the model via REST API.
+* **MLflow:** Model lifecycle management, experiment tracking, and versioning.
+* **Roboflow:** Dataset management and versioning.
+* **OpenCV & Matplotlib:** Image processing and visualization.
 
 ---
 
-## Resumen del Método
+## Method Overview
 
-El sistema no se limita a realizar inferencias, sino que implementa un flujo de **Mejora Continua**:
+The system is not limited to performing inferences, but implements a **Continuous Improvement** workflow:
 
-1.  **Cold Start:** Se inicia con un modelo base (`yolov8n.pt`) entrenado con un subset pequeño del dataset completo de Roboflow (*Living Room Object Detection*).
-2.  **Inferencia (API):** El usuario sube una imagen a través de la interfaz web. El modelo detecta los objetos y devuelve las coordenadas (Bounding Boxes).
-3.  **Feedback Loop:** Si la detección es incorrecta, el sistema permite capturar la imagen y la etiqueta corregida, almacenándola en un *Feedback Dataset*.
-4.  **Re-entrenamiento (Background Task):** Un servicio en segundo plano combina el dataset procesado con los nuevos datos de feedback, ejecuta un *Fine-Tuning* del modelo y registra la nueva versión en MLflow.
-5.  **Hot-Swap:** La API actualiza el modelo en producción automáticamente sin detener el servicio.
+1.  **Cold Start:** It starts with a base model (`yolov8n.pt`) trained on a small subset of the complete Roboflow dataset (*Living Room Object Detection*).
+2.  **Inference (API):** The user uploads an image through the web interface. The model detects objects and returns coordinates (Bounding Boxes).
+3.  **Feedback Loop:** If detection is incorrect, the system allows capturing the image and corrected label, storing it in a *Feedback Dataset*.
+4.  **Re-training (Background Task):** A background service combines the processed dataset with new feedback data, performs *Fine-Tuning* of the model, and registers the new version in MLflow.
+5.  **Hot-Swap:** The API automatically updates the model in production without stopping the service.
 
 ---
 
-## Estructura del Proyecto
+## Project Structure
 
 ```text
 yolov8_living-room_furniture/
 │
-├── app/                        # Código fuente de la aplicación principal
-│   ├── templates/              # Plantillas HTML para el Frontend
-│   │   └── index.html          # Interfaz de usuario (Upload/Predict)
-│   ├── main.py                 # Servidor FastAPI (Endpoints API)
-│   └── retrain_service.py      # Lógica de MLOps y Re-entrenamiento automático
+├── app/                        # Main application source code
+│   ├── templates/              # HTML templates for Frontend
+│   │   └── index.html          # User interface (Upload/Predict)
+│   ├── main.py                 # FastAPI server (API Endpoints)
+│   └── retrain_service.py      # MLOps logic and automatic Re-training
 │
-├── data/                       # Almacenamiento de datos (Ignorado en git)
-│   ├── base_dataset/           # Dataset base descargado de Robloflow
-│   ├── feedback_dataset/       # Imágenes recolectadas del usuario
-│   ├── processed_dataset/      # Dataset base procesado
-│   └── yolo_retrain_work/      # Archivos temporales de entrenamiento
+├── data/                       # Data storage (Ignored in git)
+│   ├── base_dataset/           # Base dataset downloaded from Roboflow
+│   ├── feedback_dataset/       # Images collected from user
+│   ├── processed_dataset/      # Processed base dataset
+│   └── yolo_retrain_work/      # Temporary training files
 │
-├── models/                     # Almacén de pesos entrenados
-│   ├── best.pt                 # Modelo base inicial
-│   └── best_vX.pt              # Versiones generadas tras el re-entrenamiento
+├── models/                     # Store of trained weights
+│   ├── best.pt                 # Initial base model
+│   └── best_vX.pt              # Versions generated after re-training
 │
-├── Notebooks/                  # Experimentación y Análisis
-│   ├── 01_EDA_Dataset_Base.ipynb      # Análisis Exploratorio de Datos
-│   ├── 02_Entrenamiento_Inicial.ipynb # Entrenamiento del modelo base (Sabotaje/Full)
-│   └── 03_Prediction.ipynb            # Pruebas de inferencia y simulación de Retrain
+├── Notebooks/                  # Experimentation and Analysis
+│   ├── 01_EDA_Dataset_Base.ipynb      # Exploratory Data Analysis
+│   ├── 02_Entrenamiento_Inicial.ipynb # Base model training (Sabotage/Full)
+│   └── 03_Prediction.ipynb            # Inference testing and Retrain simulation
 │
-├── mlruns/                     # Artefactos y métricas de MLflow (Local)
-├── requirements.txt            # Dependencias del proyecto
-├── run_app.bat                 # Script para iniciar el servidor FastAPI
-├── setup_gpu.bat               # Script para configurar entorno CUDA/Torch
+├── mlruns/                     # MLflow artifacts and metrics (Local)
+├── requirements.txt            # Project dependencies
+├── run_app.bat                 # Script to start FastAPI server
+├── setup_gpu.bat               # Script to configure CUDA/Torch environment
 └── .gitignore                  
 ```
 
-## Instalación y Ejecución
+## Installation and Execution
 
-### 1. Clonar el repositorio e instalar dependencias
+### 1. Clone the repository and install dependencies
 ```bash
 git clone <URL_DEL_REPO>
 cd yolov8_living-room_furniture
@@ -77,26 +77,26 @@ python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
 ```
-### 2. Ejecutar la Aplicación
+### 2. Run the Application
 
-Puede usar el script automático en Windows:
+You can use the automatic script on Windows:
 ```bash
 run_app.bat
 ```
-O ejecutar manualmente con Uvicorn:
+Or execute manually with Uvicorn:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-### 3. Acceder a la Web
-Abrir el navegador en: `localhost:8000`
+### 3. Access the Web
+Open the browser at: `localhost:8000`
 
 ---
 
-## Autores
+## Authors
 
 * **Karen Ortiz** - [Github](https://github.com/Karenop4)  
-  Contacto: +593 99 444 1682 - karenorpe2004@gmail.com
+  Contact: +593 99 444 1682 - karenorpe2004@gmail.com
 * **Andrés Encalada** - [Github](https://github.com/AndresEncalada)  
-  Contacto: +593 98 358 6619 - andres23102004@gmail.com
+  Contact: +593 98 358 6619 - andres23102004@gmail.com
