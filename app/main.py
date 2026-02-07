@@ -7,7 +7,7 @@ import gc
 import cv2
 import torch
 import mlflow
-import threading  # <--- VITAL PARA LOS HILOS
+import threading  # <--- VITAL FOR THREADS
 from mlflow.tracking import MlflowClient
 from typing import List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Body
@@ -20,6 +20,9 @@ import app.retrain_service as retrain_service
 
 # --- LOGGING & CONFIGURATION ---
 class EndpointFilter(logging.Filter):
+    """
+    Filters out health check logs (/api/status) to keep the console clean.
+    """
     def filter(self, record: logging.LogRecord) -> bool:
         return "/api/status" not in record.getMessage()
 
@@ -59,15 +62,26 @@ GENERIC_MAP = {
 
 # --- GLOBAL STATE & LOCKS ---
 model = None
-model_lock = threading.Lock() # <--- EL SEMÁFORO DE SEGURIDAD
+# Mutex to ensure thread safety when accessing or modifying the global model variable
+model_lock = threading.Lock() 
 is_training = False
 CURRENT_VERSION_LABEL = "Unknown"
 
 # --- HELPER: CORE PREDICTION LOGIC ---
 def process_prediction(model_ref, img, file_id, original_name):
     """
-    Lógica compartida para predecir (usada en upload y en reload).
+    Shared prediction logic used by both the upload endpoint and the reload endpoint.
+    
+    Args:
+        model_ref: Reference to the YOLO model instance.
+        img: The image data (numpy array).
+        file_id: Unique identifier for the file.
+        original_name: Original filename for client-side reference.
+        
+    Returns:
+        Dict: Structured prediction results including class, confidence, and bounding boxes.
     """
+    # specific logic to determine if model is generic (pretrained) or custom
     is_generic_model = len(model_ref.names) > 10 
     
     results = model_ref(img, conf=0.25, iou=0.5)
@@ -80,6 +94,7 @@ def process_prediction(model_ref, img, file_id, original_name):
             raw_name = model_ref.names[cls_id].lower() if cls_id in model_ref.names else "unknown"
             final_name = None
             
+            # Map generic classes (e.g., 'couch') to strict system classes (e.g., 'Sofa')
             if is_generic_model:
                 for key, val in GENERIC_MAP.items():
                     if key in raw_name:
@@ -104,47 +119,56 @@ def process_prediction(model_ref, img, file_id, original_name):
 
 # --- MODEL LOADING LOGIC ---
 def load_model_from_mlflow(run_id, label):
+    """
+    Downloads and loads a specific model version from MLflow.
+    Includes thread safety checks and memory cleanup.
+    """
     global model, CURRENT_VERSION_LABEL
     
-    # PROTECCIÓN DE HILOS: Si ya se está cargando, rebotar la petición.
+    # THREAD SAFETY: If the lock is already held (loading in progress), reject the request immediately.
+    # blocking=False ensures we don't queue up requests if the system is busy.
     if not model_lock.acquire(blocking=False):
-        logger.warning("⚠️ Sistema ocupado cargando modelo. Intento ignorado.")
+        logger.warning("⚠️ System busy loading model. Attempt ignored.")
         return False
 
     try:
         mlflow.set_tracking_uri(MLFLOW_DB)
         client = MlflowClient()
         
-        logger.info(f"📥 Descargando Run {run_id}...")
+        logger.info(f"📥 Downloading Run {run_id}...")
         local_path = client.download_artifacts(run_id, "weights", dst_path=TEMP_DIR)
         
         pt_file = os.path.join(local_path, "best.pt")
         if not os.path.exists(pt_file): pt_file = local_path 
         
-        # Soft Delete: Limpiamos memoria sin destruir la variable abruptamente
+        # Soft Delete: Clear memory without abruptly destroying the variable
         if model is not None:
             model = None 
-            gc.collect()
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
+            gc.collect() # Force garbage collection
+            if torch.cuda.is_available(): torch.cuda.empty_cache() # Clear GPU cache
             
         model = YOLO(pt_file)
         CURRENT_VERSION_LABEL = label
-        logger.info(f"✅ Modelo cambiado a: {label}")
+        logger.info(f"✅ Model switched to: {label}")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Error cambiando modelo: {e}")
+        logger.error(f"❌ Error switching model: {e}")
         return False
     finally:
-        model_lock.release() # Liberar siempre el semáforo
+        model_lock.release() # Always release the semaphore
 
 @app.on_event("startup")
 def load_initial_model():
+    """
+    Application startup routine. Attempts to load the latest model from MLflow.
+    Falls back to a local 'best.pt' if MLflow is unreachable or empty.
+    """
     global model, CURRENT_VERSION_LABEL
     mlflow.set_tracking_uri(MLFLOW_DB)
     client = MlflowClient()
     
-    logger.info("🚀 Iniciando sistema...")
+    logger.info("🚀 Starting system...")
     try:
         versions = client.search_model_versions(f"name='{REGISTERED_MODEL_NAME}'")
         if versions:
@@ -153,18 +177,19 @@ def load_initial_model():
             pt_file = os.path.join(local_path, "best.pt")
             model = YOLO(pt_file)
             CURRENT_VERSION_LABEL = f"v{latest.version}"
-            logger.info(f"⬇️ Cargado v{latest.version} desde MLflow.")
+            logger.info(f"⬇️ Loaded v{latest.version} from MLflow.")
             return
     except Exception as e:
         logger.warning(f"⚠️ MLflow warning: {e}")
 
+    # Fallback to local model
     local_model_path = os.path.join(BASE_DIR, "models", "best.pt")
     if os.path.exists(local_model_path):
-        logger.info(f"📂 Cargando modelo local: {local_model_path}")
+        logger.info(f"📂 Loading local model: {local_model_path}")
         model = YOLO(local_model_path)
         CURRENT_VERSION_LABEL = "Local Baseline"
     else:
-        logger.error("❌ CRITICAL: No se encontró ningún modelo.")
+        logger.error("❌ CRITICAL: No model found.")
 
 # --- API ENDPOINTS ---
 
@@ -174,6 +199,9 @@ async def read_root(request: Request):
 
 @app.get("/api/versions")
 def get_model_versions():
+    """
+    Retrieves available model versions from MLflow and extracts mAP metrics.
+    """
     mlflow.set_tracking_uri(MLFLOW_DB)
     client = MlflowClient()
     try:
@@ -184,8 +212,8 @@ def get_model_versions():
                 run = client.get_run(v.run_id)
                 metrics = run.data.metrics
                 
-                # --- FIX ROBUSTO DEL mAP ---
-                # Buscamos todas las variantes posibles para que no falle nunca
+                # --- ROBUST mAP FIX ---
+                # Check all possible metric keys for mAP to prevent failures
                 map50 = metrics.get('map50') or \
                         metrics.get('metrics/mAP50(B)') or \
                         metrics.get('metrics/mAP50B') or \
@@ -209,6 +237,9 @@ def get_model_versions():
 
 @app.post("/api/switch-version")
 def switch_version_endpoint(payload: Dict[str, str] = Body(...)):
+    """
+    Endpoint to trigger a hot-swap of the active model.
+    """
     run_id = payload.get("run_id")
     label = payload.get("label", "Unknown")
     
@@ -216,18 +247,23 @@ def switch_version_endpoint(payload: Dict[str, str] = Body(...)):
     if success:
         return {"status": "success", "new_version": label}
     elif not success and model is not None:
+         # 409 Conflict indicates the resource (model loader) is currently locked/busy
          raise HTTPException(409, "Server busy. Try again.")
     else:
          raise HTTPException(500, "Fatal error.")
 
 @app.post("/api/predict")
 async def predict_batch(files: List[UploadFile] = File(...)):
+    """
+    Main inference endpoint. Accepts multiple images.
+    Uses thread lock to safely access the model reference.
+    """
     global model
     if model is None: raise HTTPException(503, "Model not loaded")
 
     batch_results = []
     
-    # Usamos el Lock para leer el modelo de forma segura
+    # Use the Lock to read the model reference safely
     with model_lock:
         local_model_ref = model
         
@@ -249,11 +285,12 @@ async def predict_batch(files: List[UploadFile] = File(...)):
 
     return JSONResponse(content={"results": batch_results})
 
-# --- NUEVO ENDPOINT PARA RECARGA AUTOMÁTICA ---
+# --- NEW ENDPOINT FOR AUTOMATIC RELOAD ---
 @app.post("/api/repredict")
 def repredict_existing(payload: Dict[str, List[str]] = Body(...)):
     """
-    Vuelve a predecir sobre imágenes ya subidas.
+    Re-predicts on images already uploaded to the server.
+    Useful for updating UI results after switching model versions.
     """
     global model
     file_ids = payload.get("file_ids", [])
@@ -271,7 +308,7 @@ def repredict_existing(payload: Dict[str, List[str]] = Body(...)):
         img = cv2.imread(temp_path)
         if img is None: continue
         
-        # Reutilizamos la lógica, pasando el file_id como nombre si no tenemos el original
+        # Reuse logic, passing file_id as name if original is missing
         result = process_prediction(local_model_ref, img, file_id, file_id)
         batch_results.append(result)
         
@@ -279,6 +316,9 @@ def repredict_existing(payload: Dict[str, List[str]] = Body(...)):
 
 @app.post("/api/feedback")
 async def save_feedback(payload: Dict[str, Any] = Body(...)):
+    """
+    Saves user corrections to the feedback dataset for future training.
+    """
     file_id = payload.get("file_id")
     corrected_boxes = payload.get("boxes", []) 
     src_path = os.path.join(TEMP_DIR, file_id)
@@ -288,6 +328,8 @@ async def save_feedback(payload: Dict[str, Any] = Body(...)):
     img = cv2.imread(dst_img_path)
     h, w, _ = img.shape
     label_path = os.path.join(FEEDBACK_DIR, "labels", file_id.rsplit('.', 1)[0] + ".txt")
+    
+    # Save labels in YOLO format
     with open(label_path, "w") as f:
         for item in corrected_boxes:
             cls_name = item['class']
@@ -304,6 +346,9 @@ def reset_dataset():
     raise HTTPException(500, "Failed to clear")
 
 def retrain_task_wrapper(temp_model_path):
+    """
+    Wrapper function to run retraining in a background thread/process.
+    """
     global is_training, model
     is_training = True
     try:
@@ -320,6 +365,7 @@ def retrain_task_wrapper(temp_model_path):
             versions = client.search_model_versions(f"name='{REGISTERED_MODEL_NAME}'")
             if versions:
                 latest = sorted(versions, key=lambda x: int(x.version))[-1]
+                # Auto-load the new model after training
                 load_model_from_mlflow(new_run_id, f"v{latest.version}")
     except Exception as e:
         logger.error(f"Background training failed: {e}")
@@ -329,6 +375,10 @@ def retrain_task_wrapper(temp_model_path):
 
 @app.post("/api/retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
+    """
+    Initiates the retraining process.
+    Snapshots the current model weights before starting.
+    """
     global is_training, model
     if is_training: return JSONResponse(409, {"status": "Busy"})
     
