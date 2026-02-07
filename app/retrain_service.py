@@ -65,7 +65,7 @@ def prepare_subset_dataset(limit=None):
     return subset_train_imgs, valid_src
 
 # --- 3. GENERADOR DE YAML ---
-def generate_mixed_yaml(feedback_multiplier=2, data_limit=None):
+def generate_mixed_yaml(feedback_multiplier=1, data_limit=None):
     yaml_path = os.path.join(TEMP_YOLO_DIR, "mixed_training.yaml")
     feedback_imgs = os.path.join(FEEDBACK_DIR, "images")
     
@@ -85,7 +85,7 @@ def generate_mixed_yaml(feedback_multiplier=2, data_limit=None):
         'train': train_sources,
         'val': base_valid,
         'nc': 3,
-        'names': {0: 'Sofa', 1: 'Rug', 2: 'Pillows'}
+        'names': {0: 'Sofa', 1: 'Rug', 2: 'Pillowss'}
     }
     
     os.makedirs(TEMP_YOLO_DIR, exist_ok=True)
@@ -95,75 +95,132 @@ def generate_mixed_yaml(feedback_multiplier=2, data_limit=None):
     return yaml_path
 
 # --- 4. CICLO DE ENTRENAMIENTO ---
-def execute_retraining_cycle(base_model_path, data_limit=None):
+# --- 4. CICLO DE ENTRENAMIENTO (CON CARGA DESDE MLFLOW) ---
+def execute_retraining_cycle(base_model_path=None, data_limit=None):
+   
     try:
         if mlflow.active_run(): mlflow.end_run()
 
-        logger.info(f"🚀 Iniciando Retraining (Límite: {data_limit})...")
-        
-        train_yaml = generate_mixed_yaml(data_limit=data_limit)
-        
-        if not os.path.exists(base_model_path):
-            logger.error(f"Modelo base no encontrado: {base_model_path}")
-            return None
-            
-        model = YOLO(base_model_path)
-        
-        # --- CONFIGURACIÓN MLFLOW ROBUSTA ---
+        # --- 1. CONFIGURACIÓN DE MLFLOW ---
         db_path = os.path.join(BASE_DIR, "mlflow.db")
-        mlflow.set_tracking_uri(f"sqlite:///{db_path.replace(os.sep, '/')}")
+        tracking_uri = f"sqlite:///{db_path.replace(os.sep, '/')}"
+        mlflow.set_tracking_uri(tracking_uri)
+        client = mlflow.tracking.MlflowClient()
+
+        logger.info(f"🚀 Iniciando Retraining (Límite: {data_limit})...")
+
+        # --- 2. BUSCAR ÚLTIMA VERSIÓN EN MLFLOW ---
+        model_to_train_path = base_model_path 
         
+        try:
+            logger.info(f"🔍 Buscando última versión de '{REGISTERED_MODEL_NAME}' en MLflow...")
+            # Buscamos todas las versiones registradas
+            versions = client.search_model_versions(f"name='{REGISTERED_MODEL_NAME}'")
+            
+            if versions:
+                versions.sort(key=lambda x: int(x.version), reverse=True)
+                latest_version = versions[0]
+                run_id = latest_version.run_id
+                
+                logger.info(f"📥 Última versión encontrada: v{latest_version.version} (Run ID: {run_id})")
+                
+                # Descargamos los pesos de esa versión a una carpeta temporal
+                download_dir = os.path.join(TEMP_YOLO_DIR, "downloads")
+                os.makedirs(download_dir, exist_ok=True)
+                
+                # Listamos artefactos para encontrar el .pt dentro de la carpeta 'weights'
+                artifacts = client.list_artifacts(run_id, "weights")
+                pt_files = [x.path for x in artifacts if x.path.endswith(".pt")]
+                
+                if pt_files:
+                    artifact_path = pt_files[0]
+                    logger.info(f"   Descargando artefacto: {artifact_path}...")
+                    
+                    local_path = mlflow.artifacts.download_artifacts(
+                        run_id=run_id, 
+                        artifact_path=artifact_path, 
+                        dst_path=download_dir
+                    )
+                    model_to_train_path = local_path 
+                    logger.info(f"✅ Modelo cargado desde MLflow: {model_to_train_path}")
+                else:
+                    logger.warning("⚠️ No se encontró archivo .pt en el Run de MLflow. Usando ruta local.")
+            else:
+                logger.warning("⚠️ No hay versiones registradas en MLflow. Usando ruta local.")
+                
+        except Exception as e:
+            logger.error(f"❌ Error al intentar cargar desde MLflow: {e}")
+
+        # Validación final del modelo
+        if not model_to_train_path or not os.path.exists(model_to_train_path):
+            logger.error(f"❌ No se encontró un modelo válido para entrenar (ni en MLflow ni local).")
+            return None
+
+        # --- 3. PREPARAR DATOS Y MODELO ---
+        # Aumentamos el feedback_multiplier a 10 para forzar aprendizaje
+        train_yaml = generate_mixed_yaml(feedback_multiplier=10, data_limit=data_limit)
+        
+        model = YOLO(model_to_train_path)
+        
+        # --- 4. CONFIGURACIÓN DEL EXPERIMENTO ---
         experiment_name = "Furniture_Continuous_Learning"
-        
-        # INTENTO DE CREACIÓN EXPLÍCITA CON RUTA CORRECTA
         try:
             mlflow.create_experiment(
                 name=experiment_name,
                 artifact_location=f"file:///{MLFLOW_ARTIFACTS_PATH.replace(os.sep, '/')}"
             )
-            logger.info(f"✅ Experimento creado apuntando a: {MLFLOW_ARTIFACTS_PATH}")
         except:
-            # Si ya existe, verificamos si está bien configurado (opcional) o seguimos
             pass
-
         mlflow.set_experiment(experiment_name)
         
+        # Preparamos nombre para la NUEVA versión
         dst_weights_path, new_filename = get_next_version_path()
         run_name_dynamic = f"Retrain_{new_filename.replace('.pt', '')}"
 
+        # --- 5. EJECUCIÓN DEL ENTRENAMIENTO ---
         with mlflow.start_run(run_name=run_name_dynamic) as run:
-            logger.info(f"🏋️‍♂️ Entrenando... Destino: {new_filename}")
+            logger.info(f"🏋️‍♂️ Entrenando... Destino final será: {new_filename}")
             
             model.train(
                 data=train_yaml,
-                epochs=2,
+                epochs=5, 
                 imgsz=640,
-                batch=16,
+                batch=8,            
                 project=TEMP_YOLO_DIR,
                 name='retrain_run',
                 exist_ok=True,
-                lr0=0.0001,
-                lrf=0.1,
+                warmup_epochs=0,    
+                freeze=10,          
+                lr0=0.001,         
+                lrf=0.01,           
+                optimizer='AdamW', 
+                
                 dropout=0.0,
-                mosaic=0.5,
+                mosaic=1.0,         
+                
                 plots=False,
                 verbose=True,
                 val=True,
-                warmup_epochs=0,
                 workers=0
             )
             
+            # --- 6. REGISTRO DE RESULTADOS ---
             metrics = model.metrics
             map50 = metrics.box.map50
+            map50_95 = metrics.box.map
             logger.info(f"📈 Nuevo mAP50: {map50:.4f}")
+            logger.info(f"📈 Nuevo mAP50-95: {map50_95:.4f}")
             
+            # Copiar pesos a la carpeta local 'models/'
             src_weights = os.path.join(TEMP_YOLO_DIR, "retrain_run", "weights", "best.pt")
             shutil.copy(src_weights, dst_weights_path)
             
+            # Registrar en MLflow
             mlflow.log_metric("map50", map50)
+            mlflow.log_metric("map50-95", map50_95)
             mlflow.log_artifact(dst_weights_path, artifact_path="weights")
             
-            client = mlflow.tracking.MlflowClient()
+            # Registrar nueva versión del modelo
             try: client.create_registered_model(REGISTERED_MODEL_NAME)
             except: pass
             
@@ -172,11 +229,13 @@ def execute_retraining_cycle(base_model_path, data_limit=None):
                 source=f"runs:/{run.info.run_id}/weights/{new_filename}",
                 run_id=run.info.run_id
             )
+
+            logger.info(f"✨ Versión registrada oficialmente en MLflow: v{mv.version}")
             
             return run.info.run_id
 
     except Exception as e:
-        logger.error(f"❌ Error en retraining: {e}")
+        logger.error(f"❌ Error crítico en retraining: {e}")
         import traceback
         traceback.print_exc()
         return None

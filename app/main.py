@@ -70,7 +70,7 @@ def process_prediction(model_ref, img, file_id, original_name):
     """
     is_generic_model = len(model_ref.names) > 10 
     
-    results = model_ref(img, conf=0.10, iou=0.5)
+    results = model_ref(img, conf=0.25, iou=0.5)
     
     detections = []
     for r in results:
