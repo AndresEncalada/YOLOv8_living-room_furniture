@@ -90,6 +90,8 @@
         let EDITOR_STATE = {};
         
         // --- GLOBAL STATE FOR RE-PREDICTION ---
+        // CURRENT_FILES: Stores raw JS File objects (Blobs) locally to avoid re-uploading during version switches.
+        // currentResults: Stores the metadata returned by the API.
         let CURRENT_FILES = []; 
         let currentResults = []; 
         let currentDrag = null;
@@ -101,7 +103,7 @@
                 const data = await res.json();
                 const sel = document.getElementById('modelSelector');
                 
-                // Keep selection if possible
+                // Preserve current selection if valid
                 const currentVal = sel.value;
                 sel.innerHTML = '';
 
@@ -122,7 +124,7 @@
                     sel.value = currentVal;
                 }
 
-                // Clean listener re-attachment
+                // Hot-swap listener: Triggers backend model switch and frontend re-inference
                 const newSel = sel.cloneNode(true);
                 sel.parentNode.replaceChild(newSel, sel);
 
@@ -141,6 +143,7 @@
 
                         if (res.ok) {
                             // --- AUTO RE-PREDICT ON SWITCH ---
+                            // Automatically runs inference on current images with the NEW model
                             await triggerRepredict();
                         } else {
                             throw new Error("Failed");
@@ -157,7 +160,9 @@
             }
         }
 
-        // --- NEW: RE-PREDICT FUNCTION ---
+        // --- RE-PREDICT FUNCTION ---
+        // Vital for the feedback loop: allows seeing improvements immediately after retraining
+        // without the user needing to manually re-upload the images.
         async function triggerRepredict() {
             if (!currentResults || currentResults.length === 0) {
                 return;
@@ -183,24 +188,25 @@
                 if (response.ok) {
                     const data = await response.json();
                     
-                    // --- TRUCO: Guardar referencia a los datos viejos ---
+                    // --- DATA MAPPING TRICK ---
+                    // The backend might return new metadata, but we need the original 'original_name'
+                    // to map the result back to the browser's File object (Blob) stored in CURRENT_FILES.
                     const oldResults = [...currentResults];
                     
-                    // Actualizar state global
+                    // Update global state
                     currentResults = data.results;
                     
                     workspace.innerHTML = '';
                     
                     data.results.forEach(newItem => {
-                        // 1. El backend devolvió el ID como nombre porque no sabe el nombre real.
-                        //    Lo recuperamos buscando en los resultados anteriores.
+                        // 1. Recover the original filename from old results if necessary
                         const oldItem = oldResults.find(old => old.file_id === newItem.file_id);
                         const realName = oldItem ? oldItem.original_name : newItem.original_name;
                         
-                        // 2. Corregimos el nombre en el nuevo objeto para la UI
+                        // 2. Fix the name in the new item for UI display
                         newItem.original_name = realName;
 
-                        // 3. Ahora sí podemos encontrar el archivo físico (Blob) por su nombre real
+                        // 3. Find the physical file (Blob) using the name
                         const originalFile = CURRENT_FILES.find(f => f.name === realName);
                         
                         renderEditorCard(newItem, originalFile);
@@ -222,7 +228,7 @@
         uploadInput.addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
             if (!files.length) return;
-            CURRENT_FILES = files; // Save Blobs for later
+            CURRENT_FILES = files; // Cache Blobs in memory
             await processImages(files);
         });
 
@@ -267,6 +273,7 @@
             const canvasId = `cnv-${item.file_id}`;
             const imgAreaId = `area-${item.file_id}`;
 
+            // Canvas Area
             const imgArea = document.createElement('div');
             imgArea.id = imgAreaId;
             imgArea.className = "relative bg-slate-900 lg:w-3/4 h-full flex items-center justify-center p-4";
@@ -274,6 +281,7 @@
                 <canvas id="${canvasId}" class="shadow-2xl" style="max-width: 100%; max-height: 100%; width: auto; height: auto;"></canvas>
             `;
 
+            // Controls/List Area
             const controls = document.createElement('div');
             controls.className = "lg:w-1/4 w-full border-l border-slate-200 bg-slate-50 p-4 flex flex-col gap-3 overflow-y-auto";
             controls.innerHTML = `
@@ -304,19 +312,23 @@
             }
         }
 
+        // --- HTML5 CANVAS LOGIC ---
         function initCanvas(canvasId, containerId, fileId, img, detections) {
             const canvas = document.getElementById(canvasId);
             const container = document.getElementById(containerId);
+            
+            // Set internal resolution to match image native resolution
             canvas.width = img.width;
             canvas.height = img.height;
             
-            // CSS Aspect Ratio Logic handles display size, canvas resolution is native image size
-            
             EDITOR_STATE[fileId] = { detections: [...detections], img: img, canvas: canvas };
+            
+            // Event Listeners for Drawing
             canvas.addEventListener('mousedown', (e) => startDrawing(e, fileId));
             canvas.addEventListener('mousemove', (e) => drawMove(e, fileId));
             canvas.addEventListener('mouseup', (e) => endDrawing(e, fileId));
             canvas.addEventListener('mouseout', (e) => { if (currentDrag) currentDrag = null; draw(fileId); });
+            
             draw(fileId);
         }
 
@@ -326,6 +338,7 @@
             ctx.clearRect(0, 0, state.canvas.width, state.canvas.height);
             ctx.drawImage(state.img, 0, 0);
 
+            // Dynamic scaling for lines/text based on image resolution
             const baseSize = Math.max(state.img.width, state.img.height);
             const scale = Math.max(0.5, baseSize / 1000);
 
@@ -349,6 +362,7 @@
                 }
             };
 
+            // Draw existing detections
             state.detections.forEach(det => {
                 let color = '#94a3b8';
                 if (det.class === 'Sofa') color = '#F59E0B';
@@ -359,6 +373,7 @@
                 drawBox(det.box, label, color);
             });
 
+            // Draw current drag (user creating new box)
             if (currentDrag && currentDrag.fileId === fileId) {
                 const x = Math.min(currentDrag.startX, currentDrag.currX);
                 const y = Math.min(currentDrag.startY, currentDrag.currY);
@@ -398,6 +413,7 @@
         // --- MOUSE & EDITING HELPERS ---
         function getMousePos(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
+            // Scale mouse coordinates from Display size (CSS) to Canvas size (Resolution)
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
             return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
@@ -415,12 +431,14 @@
         }
         function endDrawing(e, fileId) {
             if (!currentDrag || currentDrag.fileId !== fileId) return;
+            // Normalize coordinates
             const x1 = Math.min(currentDrag.startX, currentDrag.currX);
             const y1 = Math.min(currentDrag.startY, currentDrag.currY);
             const x2 = Math.max(currentDrag.startX, currentDrag.currX);
             const y2 = Math.max(currentDrag.startY, currentDrag.currY);
+            
             const baseSize = Math.max(EDITOR_STATE[fileId].img.width, EDITOR_STATE[fileId].img.height);
-            const minSize = baseSize * 0.02;
+            const minSize = baseSize * 0.02; // Min size threshold to avoid accidental clicks
 
             if ((x2 - x1) > minSize && (y2 - y1) > minSize) {
                 const selectedClass = document.getElementById('active-class-selector').value;
@@ -433,6 +451,8 @@
             currentDrag = null;
             draw(fileId);
         }
+
+        // --- FEEDBACK SUBMISSION ---
         window.deleteBox = (fileId, idx) => {
             EDITOR_STATE[fileId].detections.splice(idx, 1);
             draw(fileId);
@@ -457,23 +477,30 @@
                 btn.disabled = false;
             }
         };
+
+        // --- RETRAINING PIPELINE ---
         window.triggerRetrain = async () => {
             const btn = document.getElementById('btn-retrain');
             const btnText = document.getElementById('btn-text');
             const iconRetrain = document.getElementById('icon-retrain');
             const iconLoading = document.getElementById('icon-loading');
+            
+            // UI State: Loading
             btn.disabled = true;
             btn.classList.remove('btn-black');
             btn.classList.add('btn-training');
             btnText.innerText = "Training Model...";
             iconRetrain.classList.add('hidden');
             iconLoading.classList.remove('hidden');
+            
             try {
                 const res = await fetch('/api/retrain', { method: 'POST' });
                 if (res.ok) { pollStatus(); } else { throw new Error("API Error"); }
             } catch (e) { resetButtonUI("Error", true); }
         };
+
         async function pollStatus() {
+            // Polling interval to check training status
             const interval = setInterval(async () => {
                 try {
                     const res = await fetch('/api/status');
@@ -482,13 +509,13 @@
                     if(!data.training_active) {
                         clearInterval(interval);
                         
-                        // 1. Refresh Versions
+                        // 1. Refresh Versions (Frontend now knows about the new model)
                         await loadVersions(); 
                         
                         // 2. UI Updates
                         resetButtonUI("Success! Reloading...", false);
                         
-                        // 3. Auto-repredict if files exist
+                        // 3. Auto-repredict if files exist (The magic moment where users see improvement)
                         setTimeout(() => {
                             if (currentResults.length > 0) {
                                 triggerRepredict();
@@ -502,6 +529,7 @@
                 }
             }, 1500);
         }
+
         function resetButtonUI(text, isError, isReset = false) {
             const btn = document.getElementById('btn-retrain');
             const btnText = document.getElementById('btn-text');
@@ -522,6 +550,7 @@
                 btnText.innerText = text;
             }
         }
+        
         window.resetData = async () => {
             if (!confirm("⚠️ Delete all feedback history?")) return;
             try { await fetch('/api/reset', { method: 'POST' }); alert("History cleared."); }
