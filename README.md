@@ -23,13 +23,7 @@ This project implements an end-to-end **Computer Vision** solution for detecting
 
 ## Method Overview
 
-The system is not limited to performing inferences, but implements a **Continuous Improvement** workflow:
-
-1.  **Cold Start:** It starts with a base model (`yolov8n.pt`) trained on a small subset of the complete Roboflow dataset (*Living Room Object Detection*).
-2.  **Inference (API):** The user uploads an image through the web interface. The model detects objects and returns coordinates (Bounding Boxes).
-3.  **Feedback Loop:** If detection is incorrect, the system allows capturing the image and corrected label, storing it in a *Feedback Dataset*.
-4.  **Re-training (Background Task):** A background service combines the processed dataset with new feedback data, performs *Fine-Tuning* of the model, and registers the new version in MLflow.
-5.  **Hot-Swap:** The API automatically updates the model in production without stopping the service.
+This furniture detection system (Sofas, Rugs, and Cushions) implements a Continuous Learning workflow that automates YOLOv8 model evolution through an MLOps cycle managed by MLflow. The architecture is based on an asynchronous API developed with FastAPI that not only performs inferences but also integrates a Feedback Loop where user corrections are consolidated into a refinement dataset to execute background Fine-Tuning processes. The retraining service applies weighted sampling strategies to prioritize the correction of previous errors and, once the new model version is registered with its respective mAP metrics, the system performs a Hot-Swap to update production weights without service interruptions, ensuring constant optimization based on real-world data.
 
 ---
 
@@ -77,7 +71,13 @@ python -m venv venv
 .\venv\Scripts\activate
 pip install -r requirements.txt
 ```
-### 2. Run the Application
+### 2. Setup de GPU
+
+You can use the following script to let the model use your GPU instead of CPU.
+```bash
+setup_gpu.bat
+```
+### 3. Run the Application
 
 You can use the automatic script on Windows:
 ```bash
@@ -89,7 +89,7 @@ Or execute manually with Uvicorn:
 uvicorn app.main:app --reload
 ```
 
-### 3. Access the Web
+### 4. Access the Web
 Open the browser at: `localhost:8000`
 
 ---
